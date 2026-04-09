@@ -384,7 +384,7 @@ class AppLauncher:
     _APPLAUNCHER_CFG_INFO: dict[str, tuple[list[type], Any]] = {
         "headless": ([bool], False),
         "livestream": ([int], -1),
-        "enable_cameras": ([bool], False),
+        "enable_cameras": ([bool], True), # DEBUG
         "xr": ([bool], False),
         "device": ([str], "cuda:0"),
         "experience": ([str], ""),
@@ -604,8 +604,10 @@ class AppLauncher:
 
     def _resolve_camera_settings(self, launcher_args: dict):
         """Resolve camera related settings."""
-        enable_cameras_env = int(os.environ.get("ENABLE_CAMERAS", 0))
-        enable_cameras_arg = launcher_args.get("enable_cameras", AppLauncher._APPLAUNCHER_CFG_INFO["enable_cameras"][1])
+        enable_cameras_env = int(os.environ.get("ENABLE_CAMERAS", 1))
+        enable_cameras_arg = launcher_args.get(
+            "enable_cameras", AppLauncher._APPLAUNCHER_CFG_INFO["enable_cameras"][1]
+        )
         enable_cameras_valid_vals = {0, 1}
         if enable_cameras_env not in enable_cameras_valid_vals:
             raise ValueError(
@@ -613,12 +615,18 @@ class AppLauncher:
                 f"Expected: {enable_cameras_valid_vals} ."
             )
         # We allow enable_cameras kwarg to supersede ENABLE_CAMERAS envvar
-        if enable_cameras_arg is True:
-            self._enable_cameras = enable_cameras_arg
+
+        ################### We change the default behavior to enable cameras in headless mode ###################
+        if enable_cameras_env is False or enable_cameras_arg is False:
+            print(
+                "[INFO][AppLauncher]: Camera sensors are disabled. To enable camera sensors, please set"
+                " the environment variable `ENABLE_CAMERAS=1` or pass the input keyword argument"
+                " `enable_cameras=True` to the AppLauncher."
+            )
+            self._enable_cameras = False
+            self._offscreen_render = False
         else:
-            self._enable_cameras = bool(enable_cameras_env)
-        self._offscreen_render = False
-        if self._enable_cameras and self._headless:
+            self._enable_cameras = True
             self._offscreen_render = True
 
     def _resolve_xr_settings(self, launcher_args: dict):
@@ -724,19 +732,19 @@ class AppLauncher:
             if self._enable_cameras and not self._xr:
                 if self._headless and not self._livestream:
                     self._sim_experience_file = os.path.join(
-                        isaaclab_app_exp_path, "isaaclab.python.headless.rendering.kit"
+                        isaaclab_app_exp_path, "isaaclab.python.kit"
                     )
                 else:
-                    self._sim_experience_file = os.path.join(isaaclab_app_exp_path, "isaaclab.python.rendering.kit")
+                    self._sim_experience_file = os.path.join(isaaclab_app_exp_path, "isaaclab.python.kit")
             elif self._xr:
                 if self._headless:
                     self._sim_experience_file = os.path.join(
-                        isaaclab_app_exp_path, "isaaclab.python.xr.openxr.headless.kit"
+                        isaaclab_app_exp_path, "isaaclab.python.kit"
                     )
                 else:
-                    self._sim_experience_file = os.path.join(isaaclab_app_exp_path, "isaaclab.python.xr.openxr.kit")
+                    self._sim_experience_file = os.path.join(isaaclab_app_exp_path, "isaaclab.python.kit")
             elif self._headless and not self._livestream:
-                self._sim_experience_file = os.path.join(isaaclab_app_exp_path, "isaaclab.python.headless.kit")
+                self._sim_experience_file = os.path.join(isaaclab_app_exp_path, "isaaclab.python.kit")
             else:
                 self._sim_experience_file = os.path.join(isaaclab_app_exp_path, "isaaclab.python.kit")
         elif not os.path.isabs(self._sim_experience_file):
@@ -873,6 +881,7 @@ class AppLauncher:
         # in theory, this should ensure that dt is consistent across time stepping, but this is not the case
         # for now, we use the custom loop runner from Isaac Sim to achieve this
         carb_settings_iface.set_bool("/app/player/useFixedTimeStepping", False)
+        carb_settings_iface.set_bool("/isaaclab/cameras_enabled", self._enable_cameras)
 
     def _hide_stop_button(self):
         """Hide the stop button in the toolbar.
