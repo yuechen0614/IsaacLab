@@ -48,6 +48,7 @@ from isaaclab.utils.string import to_camel_case
 from isaaclab_physx.cloner import PhysxReplicateContext
 
 from .physx_manager_cfg import PhysxBackendCfg
+from .tensor_device import DeviceSimulationView
 
 if TYPE_CHECKING:
     from isaaclab.sim.simulation_context import SimulationContext
@@ -172,14 +173,18 @@ class PhysxBackend:
     """Own the native PhysX tensor view shared by physics and scene data."""
 
     def __init__(self, cfg: PhysxBackendCfg):
-        self.simulation_view = omni.physics.tensors.create_simulation_view("warp", stage_id=cfg.stage_id)
-        self.simulation_view.set_subspace_roots("/")
+        self.native_simulation_view = omni.physics.tensors.create_simulation_view("warp", stage_id=cfg.stage_id)
+        self.native_simulation_view.set_subspace_roots("/")
+        self.simulation_view = self.native_simulation_view
+        if cfg.device is not None and cfg.device != str(self.native_simulation_view.device):
+            self.simulation_view = DeviceSimulationView(self.native_simulation_view, cfg.device)
 
     def close(self) -> None:
         """Invalidate the native tensor view once and release its handle."""
         if self.simulation_view is not None:
             self.simulation_view.invalidate()
             self.simulation_view = None
+            self.native_simulation_view = None
 
 
 class PhysxSceneDataBackend(SceneDataBackend):
@@ -402,6 +407,7 @@ class PhysxManager(PhysicsManager):
     _view_created: ClassVar[bool] = False
     _assets_loaded: ClassVar[bool] = True
     _stage_id: ClassVar[int] = -1
+    _simulation_device: ClassVar[str | None] = None
     _subscriptions: ClassVar[dict[str, Any]] = {}
     _fabric: ClassVar[Any] = None
     _update_fabric: ClassVar[Callable[[float, float], None] | None] = None
@@ -415,7 +421,7 @@ class PhysxManager(PhysicsManager):
             pass
 
         def get_simulation_time(self) -> float:
-            return omni.physx.get_physx_interface().get_simulation_time()
+            return PhysicsManager.get_simulation_time()
 
         def is_simulating(self) -> bool:
             return omni.physx.get_physx_interface().is_simulating()
@@ -508,7 +514,15 @@ class PhysxManager(PhysicsManager):
         if cls._fabric is not None and cls._update_fabric is not None:
             if cls.backend is not None and sim is not None and sim.is_playing():
                 cls.backend.simulation_view.update_articulations_kinematic()
+                # PhysX 110.3 CPU tensor writes can leave Fabric transforms stale
+                # even after force_update(). Rebind the output stage, without
+                # stepping physics, to publish rigid/articulation poses.
+                if cls.get_physics_sim_device() == "cpu":
+                    cls._re_sync_fabric()
             cls._update_fabric(0.0, 0.0)
+        elif cls.backend is not None and sim is not None and sim.is_playing():
+            cls.backend.simulation_view.update_articulations_kinematic()
+            omni.physx.get_physx_interface().update_transformations(False, True, False, False)
 
     @classmethod
     def get_scene_data_backend(cls) -> SceneDataBackend:
@@ -533,8 +547,10 @@ class PhysxManager(PhysicsManager):
             return
 
         physx_sim = omni.physx.get_physx_simulation_interface()
-        physx_sim.simulate(sim.cfg.dt, 0.0)
+        physx_sim.simulate(sim.cfg.dt, PhysicsManager._sim_time)
         physx_sim.fetch_results()
+        # Count completed physics steps only; rendering and view warmup do not advance this clock.
+        PhysicsManager._sim_time += sim.cfg.dt
         device = PhysicsManager._device
         if "cuda" in device:
             torch.cuda.set_device(device)
@@ -615,6 +631,7 @@ class PhysxManager(PhysicsManager):
         cls._warmup_needed = True
         cls._assets_loaded = True
         cls._callback_exception = None
+        cls._simulation_device = None
 
         super().close()
 
@@ -624,8 +641,9 @@ class PhysxManager(PhysicsManager):
 
     @classmethod
     def get_physics_sim_device(cls) -> str:
-        """Get the physics simulation device (Isaac Sim compatibility alias)."""
-        return PhysicsManager.get_device()
+        """Get the native PhysX device; get_device() remains the Lab compute device."""
+        cfg = PhysicsManager._cfg
+        return cls._simulation_device or getattr(cfg, "simulation_device", None) or PhysicsManager.get_device()
 
     @classmethod
     def assets_loading(cls) -> bool:
@@ -738,7 +756,9 @@ class PhysxManager(PhysicsManager):
         if sim is None or cfg is None:
             return
 
-        device = sim.device
+        device = cfg.simulation_device or sim.device
+        if not isinstance(device, str) or re.fullmatch(r"cpu|cuda(?::[0-9]+)?", device) is None:
+            raise ValueError(f"PhysxCfg.simulation_device must be cpu, cuda, or cuda:<index>, got {device!r}.")
 
         # global settings (via SettingsManager)
         sim.set_setting("/persistent/omnihydra/useSceneGraphInstancing", True)  # type: ignore[union-attr]
@@ -748,7 +768,7 @@ class PhysxManager(PhysicsManager):
         sim.set_setting("/physics/collisionCylinderCustomGeometry", False)  # type: ignore[union-attr]
         sim.set_setting("/physics/autoPopupSimulationOutputWindow", False)  # type: ignore[union-attr]
 
-        # device setup (set on PhysicsManager so PhysicsManager.get_device() works)
+        # Configure the native solver without changing the Lab compute device.
         is_gpu = "cuda" in device
         if is_gpu:
             parts = device.split(":")
@@ -756,11 +776,11 @@ class PhysxManager(PhysicsManager):
             device_id = int(parts[1]) if len(parts) > 1 else max(0, int(cuda_device) if cuda_device is not None else 0)
             sim.set_setting("/physics/cudaDevice", device_id)  # type: ignore[union-attr]
             sim.set_setting("/physics/suppressReadback", True)  # type: ignore[union-attr]
-            PhysicsManager._device = f"cuda:{device_id}"
+            cls._simulation_device = f"cuda:{device_id}"
         else:
             sim.set_setting("/physics/cudaDevice", -1)  # type: ignore[union-attr]
             sim.set_setting("/physics/suppressReadback", False)  # type: ignore[union-attr]
-            PhysicsManager._device = "cpu"
+            cls._simulation_device = "cpu"
 
         # physx scene api (use sim.cfg for shared parameters like physics_prim_path, dt, physics_material)
         # apply schema and set attributes by name
@@ -818,6 +838,7 @@ class PhysxManager(PhysicsManager):
             "solve_articulation_contact_last",
             "dt",
             "device",
+            "simulation_device",
             "render_interval",
             "gravity",
             "physics_prim_path",
@@ -945,7 +966,7 @@ class PhysxManager(PhysicsManager):
 
         stage_id = get_current_stage_id()
 
-        is_gpu = "cuda" in PhysicsManager.get_device()
+        is_gpu = "cuda" in cls.get_physics_sim_device()
 
         physx = omni.physx.get_physx_interface()
         physx_sim = omni.physx.get_physx_simulation_interface()
@@ -971,7 +992,7 @@ class PhysxManager(PhysicsManager):
 
         # Register the complete tensor view only after PhysX has loaded the stage.
         sim = PhysicsManager._sim
-        cls.backend = sim.get_or_create_backend(PhysxBackendCfg(stage_id=stage_id))
+        cls.backend = sim.get_or_create_backend(PhysxBackendCfg(stage_id=stage_id, device=sim.device))
         cls._scene_data_backend.backend = cls.backend
 
         # Final update after view creation
@@ -1010,7 +1031,7 @@ class PhysxManager(PhysicsManager):
         # calls attach_stage() on a stage that is still attached ("Stage already attached") and
         # corrupts PhysX's native view registry (SIGSEGV inside omni.physx.tensors). Guarded by
         # get_attached_stage() so this is a no-op when close() already detached it.
-        if "cuda" in PhysicsManager.get_device() and (physx_sim := omni.physx.get_physx_simulation_interface()):
+        if "cuda" in cls.get_physics_sim_device() and (physx_sim := omni.physx.get_physx_simulation_interface()):
             if physx_sim.get_attached_stage():
                 physx_sim.detach_stage()
 

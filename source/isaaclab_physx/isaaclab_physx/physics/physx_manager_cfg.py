@@ -25,6 +25,9 @@ class PhysxBackendCfg(BackendCfg):
     class_type: type[PhysxBackend] | str = "{DIR}.physx_manager:PhysxBackend"
     """Native simulation-view owner."""
 
+    device: str | None = None
+    """Device for Lab tensor consumers. None keeps the native PhysX device."""
+
     stage_id: int = MISSING
     """USD stage cache identifier bound to the native view."""
 
@@ -38,7 +41,8 @@ class PhysxCfg(PhysicsCfg):
     see the `PhysX 5 SDK documentation`_.
 
     PhysX 5 supports GPU-accelerated physics simulation. This is enabled by default,
-    but can be disabled by setting :attr:`device` to ``cpu``. Unlike CPU PhysX, the
+    but can be disabled by setting :attr:`simulation_device` to ``cpu`` (or
+    ``SimulationCfg.device`` when :attr:`simulation_device` is ``None``). Unlike CPU PhysX, the
     GPU simulation feature is unable to dynamically grow all the buffers. Therefore,
     it is necessary to provide a reasonable estimate of the buffer sizes for GPU
     features. If insufficient buffer sizes are provided, the simulation will fail
@@ -54,6 +58,12 @@ class PhysxCfg(PhysicsCfg):
 
     class_type: type[PhysxManager] | str = "{DIR}.physx_manager:PhysxManager"
     """The class type of the PhysxManager."""
+
+    simulation_device: str | None = None
+    """Native PhysX device, independent of SimulationCfg.device (Lab compute).
+
+    None follows SimulationCfg.device. Mixed devices use explicit tensor copies.
+    """
 
     # ------------------------------------------------------------------
     # Solver Settings

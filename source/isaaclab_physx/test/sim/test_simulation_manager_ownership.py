@@ -26,6 +26,7 @@ enable_extension("isaacsim.core.simulation_manager")
 import isaacsim.core.simulation_manager as simulation_manager_module
 
 import isaaclab.sim as sim_utils
+from isaaclab.physics import PhysicsManager
 from isaaclab.sim import SimulationCfg, SimulationContext
 
 pytestmark = pytest.mark.integration
@@ -57,3 +58,50 @@ def test_initialize_claims_simulation_manager_lifecycle():
         assert simulation_manager_module.SimulationManager is original_manager
     else:
         assert simulation_manager_module.SimulationManager is PhysxManager
+
+
+@pytest.mark.isaacsim_ci
+def test_clock_tracks_completed_steps_and_compatibility_reads():
+    """Physics, rather than rendering or wall time, advances the common clock [s]."""
+    import omni.physx
+
+    sim = SimulationContext(cfg=SimulationCfg(physics=PhysxCfg(), device=resolve_test_sim_device(), dt=0.004))
+    sim.reset()
+    durations = []
+    subscription = omni.physx.get_physx_interface().subscribe_physics_step_events(durations.append)
+    assert PhysicsManager.get_simulation_time() == 0.0
+    for count in range(1, 6):
+        sim.step(render=False)
+        expected = count * sim.cfg.dt
+        assert PhysxManager.get_simulation_time() == pytest.approx(expected)
+        assert PhysicsManager.get_simulation_time() == pytest.approx(expected)
+        assert PhysxManager._simulation_manager_interface.get_simulation_time() == pytest.approx(expected)
+    assert len(durations) == 5
+    assert sum(durations) == pytest.approx(PhysicsManager.get_simulation_time())
+    for _ in range(3):
+        sim.forward()
+        sim.render()
+    assert PhysicsManager.get_simulation_time() == pytest.approx(expected)
+    assert len(durations) == 5
+    del subscription
+
+
+@pytest.mark.isaacsim_ci
+def test_clock_survives_reset_and_restarts_with_new_context():
+    """Reset refreshes a live context; closing/recreating it begins a new clock."""
+    cfg = SimulationCfg(physics=PhysxCfg(), device=resolve_test_sim_device(), dt=0.004)
+    sim = SimulationContext(cfg=cfg)
+    sim.reset()
+    sim.step(render=False)
+    assert PhysicsManager.get_simulation_time() == pytest.approx(cfg.dt)
+    for soft in (True, False):
+        sim.reset(soft=soft)
+        assert PhysicsManager.get_simulation_time() == pytest.approx(cfg.dt)
+    SimulationContext.clear_instance()
+    assert PhysicsManager.get_simulation_time() == 0.0
+    sim_utils.create_new_stage()
+    sim = SimulationContext(cfg=cfg)
+    assert PhysicsManager.get_simulation_time() == 0.0
+    sim.reset()
+    sim.step(render=False)
+    assert PhysicsManager.get_simulation_time() == pytest.approx(cfg.dt)
