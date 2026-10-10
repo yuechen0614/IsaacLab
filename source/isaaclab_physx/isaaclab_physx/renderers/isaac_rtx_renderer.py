@@ -55,6 +55,20 @@ _PPISP_IMPORT_ERROR_MESSAGE = (
 )
 
 
+# Kit retains some native render-view allocations by product name after destroy.
+# Recycle only fully cleaned names from another stage: same-stage reuse can hit
+# stale SyntheticData activations, and live cameras must always have distinct names.
+_RELEASED_RENDER_PRODUCT_NAMES: dict[str, str] = {}
+
+
+def _acquire_render_product_name(stage_key: str) -> str:
+    for name, previous_stage in _RELEASED_RENDER_PRODUCT_NAMES.items():
+        if previous_stage != stage_key:
+            del _RELEASED_RENDER_PRODUCT_NAMES[name]
+            return name
+    return f"rp_{uuid.uuid4().hex}"
+
+
 def _raise_missing_ppisp_error(exc: ModuleNotFoundError) -> NoReturn:
     # Only translate missing isaaclab_ppisp imports into the optional-dependency hint;
     # unrelated missing modules should surface unchanged for easier debugging.
@@ -139,6 +153,8 @@ class IsaacRtxRenderData:
     """Internal HDR scratch buffer allocated when the user did not request
     ``"rgb_hdr"`` in ``data_types`` but the PPISP pipeline still needs
     somewhere to receive the HDR AOV before LDR conversion."""
+    render_product_name: str | None = None
+    render_product_stage_key: str | None = None
 
     def __post_init__(self):
         """Compile the stage-bound calibration columns owned by this render product."""
@@ -350,15 +366,14 @@ class IsaacRtxRenderer(BaseRenderer):
             if not cam_prim.IsA(UsdGeom.Camera):
                 raise RuntimeError(f"Prim at path '{cam_prim_path}' is not a Camera.")
 
-        # Unique UUID name so concurrent tiled cameras and sequential env create/destroy
-        # cycles in one Kit process do not reuse a stale Replicator / SyntheticData activation.
-        # ``uuid4().hex`` (no hyphens) prefixed with ``rp_`` is a valid USD identifier.
-        # Collision risk is negligible: uuid4 provides 122 random bits, so the birthday-paradox
-        # chance among n names is ~n^2 / 2^123 (e.g. ~10^-25 for a million names).
+        # Keep names unique within a stage, but reuse fully released slots after
+        # stage replacement so Kit's native render-view caches remain bounded.
+        stage_key = str(stage.GetRootLayer().identifier)
+        product_name = _acquire_render_product_name(stage_key)
         rp = rep.create.render_product_tiled(
             cameras=cam_prim_paths,
             tile_resolution=(spec.cfg.width, spec.cfg.height),
-            name=f"rp_{uuid.uuid4().hex}",
+            name=product_name,
         )
 
         # Apply background color as per-render-product USD attributes so each render product gets its own
@@ -486,6 +501,8 @@ class IsaacRtxRenderer(BaseRenderer):
         return IsaacRtxRenderData(
             annotators=annotators,
             render_product=rp,
+            render_product_name=product_name,
+            render_product_stage_key=stage_key,
             spec=spec,
             ppisp_pipeline=ppisp_pipeline,
         )
@@ -782,3 +799,8 @@ class IsaacRtxRenderer(BaseRenderer):
         render_data.renderer_info.clear()
         render_data.ppisp_pipeline = None
         render_data._hdr_scratch_wp = None
+        # Publish a reusable slot only after every owned resource was released.
+        if render_data.render_product_name is not None and render_data.render_product_stage_key is not None:
+            _RELEASED_RENDER_PRODUCT_NAMES[render_data.render_product_name] = render_data.render_product_stage_key
+            render_data.render_product_name = None
+            render_data.render_product_stage_key = None

@@ -59,13 +59,7 @@ def test_isaac_rtx_supported_output_types_include_rgb_hdr(monkeypatch):
 
 
 def test_create_render_data_uses_unique_sdf_safe_render_product_name(monkeypatch):
-    """Each tiled render product gets a fresh ``rp_<uuid4.hex>`` name.
-
-    Unique names avoid collisions across concurrent tiled cameras and sequential
-    create/destroy cycles in one Kit process (e.g. ``simple_shading_*`` pytest).
-    uuid4 provides 122 random bits, so birthday-paradox collision chance among n
-    names is ~n^2 / 2^123 — negligible for Isaac Lab workloads.
-    """
+    """Live and same-stage cameras stay distinct; closed-stage slots can be reused."""
     replicator_core_module, syntheticdata_module = _install_omni_stubs(monkeypatch)
     monkeypatch.setattr(syntheticdata_module, "SyntheticData", MagicMock(), raising=False)
 
@@ -117,13 +111,15 @@ def test_create_render_data_uses_unique_sdf_safe_render_product_name(monkeypatch
     # sequential simple_shading_* / multi-camera collision case this fix targets).
     num_names = 256
     names: list[str] = []
+    created = []
+    monkeypatch.setattr(rtx_renderer, "_RELEASED_RENDER_PRODUCT_NAMES", {})
     with (
         patch.object(rtx_renderer, "get_settings_manager", return_value=settings),
         patch.object(rtx_renderer, "get_isaac_sim_version", return_value=version.parse("6.0")),
         patch.object(stage_utils, "get_current_stage", return_value=stage),
     ):
         for _ in range(num_names):
-            renderer.create_render_data(spec)
+            created.append(renderer.create_render_data(spec))
             names.append(create_tiled.call_args.kwargs["name"])
 
     # Every call must mint a distinct name — a reused default was the original bug.
@@ -139,6 +135,34 @@ def test_create_render_data_uses_unique_sdf_safe_render_product_name(monkeypatch
         # Replicator builds a USD prim from this name; reject illegal identifiers.
         assert Sdf.Path.IsValidIdentifier(name)
         assert Sdf.Path.IsValidPathString(f"/Render/{name}")
+
+    # A complete cleanup may free a name, but not for this same stage.
+    renderer.cleanup(created[0])
+    with (
+        patch.object(rtx_renderer, "get_settings_manager", return_value=settings),
+        patch.object(rtx_renderer, "get_isaac_sim_version", return_value=version.parse("6.0")),
+        patch.object(stage_utils, "get_current_stage", return_value=stage),
+    ):
+        renderer.create_render_data(spec)
+        assert create_tiled.call_args.kwargs["name"] not in names
+
+        # A replacement stage can reuse only the fully cleaned product's slot.
+        new_stage = MagicMock()
+        new_stage.SelectPrims.return_value.GetCount.return_value = 1
+        new_stage.GetPrimAtPath.return_value.IsA.side_effect = lambda typ: typ is UsdGeom.Camera
+        with patch.object(stage_utils, "get_current_stage", return_value=new_stage):
+            renderer.create_render_data(spec)
+            assert create_tiled.call_args.kwargs["name"] == names[0]
+            renderer.create_render_data(spec)
+            assert create_tiled.call_args.kwargs["name"] not in names
+
+        # Failed native destruction cannot publish a reusable slot.
+        rp.destroy.side_effect = RuntimeError("native destroy failed")
+        with pytest.raises(RuntimeError, match="native destroy failed"):
+            renderer.cleanup(created[1])
+        with patch.object(stage_utils, "get_current_stage", return_value=new_stage):
+            renderer.create_render_data(spec)
+            assert create_tiled.call_args.kwargs["name"] != names[1]
 
 
 @pytest.mark.parametrize(
