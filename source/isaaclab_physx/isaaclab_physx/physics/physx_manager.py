@@ -702,9 +702,12 @@ class PhysxManager(PhysicsManager):
 
     @classmethod
     def _unsubscribe_from_event(cls, callback_id: int, event: PhysicsEvent | IsaacEvents, subscription: Any) -> None:
-        """Unsubscribe from PhysX/Isaac events."""
+        """Stop native event delivery even when another owner retains the subscription."""
         if subscription is not None and hasattr(subscription, "unsubscribe"):
             subscription.unsubscribe()
+        elif subscription is not None and hasattr(subscription, "reset"):
+            # EventDispatcher returns ObserverGuard, not an event-stream ISubscription.
+            subscription.reset()
 
     @classmethod
     def _subscribe_isaac(cls, callback: Callable, event: IsaacEvents, order: int, name: str | None) -> Any:
