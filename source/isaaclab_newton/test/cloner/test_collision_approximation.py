@@ -10,7 +10,7 @@ import pytest
 from isaaclab_newton.cloner.newton_clone_utils import build_source_builders
 from newton import GeoType, ShapeFlags
 
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 _SOURCE = "/World/Asset"
 
@@ -231,3 +231,53 @@ class TestClonerCollisionApproximation:
 
         assert flags_by_label[f"{_SOURCE}/MeshOnly/geom"] & ShapeFlags.VISIBLE
         assert not flags_by_label[f"{_SOURCE}/Authored/collider"] & ShapeFlags.VISIBLE
+
+
+@pytest.mark.parametrize("approximation", ["convexHull", "convexDecomposition"])
+@pytest.mark.parametrize("rigid", [False, True])
+def test_approximated_viewport_mesh_preserves_visible_original_topology(approximation, rigid):
+    """Physics approximation must not hide the renderable mesh or expose its hull."""
+    stage = _make_stage(approximation)
+    root = stage.GetPrimAtPath(_SOURCE)
+    if not rigid:
+        root.RemoveAPI(UsdPhysics.RigidBodyAPI)
+    mesh = UsdGeom.Mesh(stage.GetPrimAtPath(f"{_SOURCE}/geom"))
+    mesh.CreateDisplayColorAttr([(0.45, 0.32, 0.15)])
+    before = stage.GetRootLayer().ExportToString()
+
+    builder = _build(stage)
+    visual = builder.shape_label.index(f"{_SOURCE}/geom_visual")
+    assert builder.shape_type[visual] == GeoType.MESH
+    assert builder.shape_flags[visual] & ShapeFlags.VISIBLE
+    assert not builder.shape_flags[visual] & ShapeFlags.COLLIDE_SHAPES
+    collider_rows = [i for i, flags in enumerate(builder.shape_flags) if flags & ShapeFlags.COLLIDE_SHAPES]
+    assert collider_rows
+    assert all(not builder.shape_flags[i] & ShapeFlags.VISIBLE for i in collider_rows)
+    assert builder.shape_color[visual] == pytest.approx(
+        tuple(1.055 * c ** (1 / 2.4) - 0.055 for c in (0.45, 0.32, 0.15))
+    )
+    assert len(builder.shape_source[visual].vertices) == len(mesh.GetPointsAttr().Get())
+    assert stage.GetRootLayer().ExportToString() == before
+
+
+def test_generated_mesh_uses_source_omnipbr_tint_and_material_binding():
+    """Synthetic labels retain the source material's color and runtime binding."""
+    stage = _make_stage("convexHull")
+    mesh = stage.GetPrimAtPath(f"{_SOURCE}/geom")
+    material = UsdShade.Material.Define(stage, "/Looks/Table")
+    shader = UsdShade.Shader.Define(stage, "/Looks/Table/Shader")
+    shader.CreateImplementationSourceAttr(UsdShade.Tokens.sourceAsset)
+    shader.SetSourceAsset(Sdf.AssetPath("OmniPBR.mdl"), "mdl")
+    shader.SetSourceAssetSubIdentifier("OmniPBR", "mdl")
+    shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.8, 0.4, 0.2))
+    shader.CreateInput("diffuse_tint", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.25, 0.5, 1.0))
+    material.CreateSurfaceOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
+    UsdShade.MaterialBindingAPI.Apply(mesh).Bind(material)
+    before = stage.GetRootLayer().ExportToString()
+
+    builder = _build(stage)
+    visual = builder.shape_label.index(f"{_SOURCE}/geom_visual")
+    expected = 1.055 * 0.2 ** (1 / 2.4) - 0.055
+    assert builder.shape_color[visual] == pytest.approx((expected,) * 3)
+    assert builder.custom_attributes["isaaclab:visual_material_path"].values[visual] == "/Looks/Table"
+    assert stage.GetRootLayer().ExportToString() == before

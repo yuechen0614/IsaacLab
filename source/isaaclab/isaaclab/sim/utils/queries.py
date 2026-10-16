@@ -419,7 +419,12 @@ def resolve_matching_prims_from_source(
     """Resolve matching prims from a single(source) instance when multiple instances are present.
 
     The returned prims come from the stage source instance, while each destination expression
-    keeps the multi-instance pattern that callers can pass to simulation views.
+    keeps the multi-instance pattern that callers can pass to simulation views. When the source
+    expression selects one prim, the input expression is preserved so uniquely selected assets
+    may have different names across instances and concrete paths stay concrete. Multiple source
+    matches retain their existing destination expressions with concrete suffixes. If a plan
+    source has no match but the requested path exists on the stage, direct stage resolution
+    supports assets authored after cloning.
 
     Args:
         path_expr: Prim path expression to resolve. It may contain regex wildcards.
@@ -438,14 +443,22 @@ def resolve_matching_prims_from_source(
     """
     plan = SimulationContext.instance().get_clone_plan()
     resolved = cloner.query.path_to_source(plan, path_expr) if plan is not None else None
+    stage_match = None
     if resolved is not None:
         source_path, dest_expr, asset_suffix = resolved
         source_expr = source_path + asset_suffix
         source_prim = get_current_stage().GetPrimAtPath(source_path)
-        results = [
-            (prim, dest_expr + prim.GetPath().pathString[len(source_path) :])
-            for prim in _iter_matching_prims_in_subtree(source_expr, source_prim)
-        ]
+        source_matches = list(_iter_matching_prims_in_subtree(source_expr, source_prim))
+        if not source_matches:
+            # Post-clone assets need not exist in the prototype instance.
+            stage_match = find_first_matching_prim(path_expr)
+            if stage_match is not None:
+                resolved = None
+    if resolved is not None:
+        if len(source_matches) == 1:
+            results = [(source_matches[0], path_expr)]
+        else:
+            results = [(prim, dest_expr + prim.GetPath().pathString[len(source_path) :]) for prim in source_matches]
     else:
         # No clone plan, or ``path_expr`` is not owned by any plan row. Resolve from the stage
         # in two phases (mirroring the clone-plan branch above): (1) locate ONE instance root to
@@ -467,7 +480,7 @@ def resolve_matching_prims_from_source(
             instance_seg = len(ns_segments) - 1
         else:
             instance_seg = next((i for i, seg in enumerate(segments) if not seg.isidentifier()), None)
-        first = find_first_matching_prim(path_expr)
+        first = stage_match if stage_match is not None else find_first_matching_prim(path_expr)
         if first is None:
             results = []
         elif instance_seg is None:
@@ -479,12 +492,18 @@ def resolve_matching_prims_from_source(
             instance_root = "/" + "/".join(match_segments[: instance_seg + 1])
             trailing = segments[instance_seg + 1 :]
             walk_root = instance_root + ("/" + "/".join(trailing) if trailing else "")
-            results = [
-                (prim, instance_expr + prim.GetPath().pathString[len(instance_root) :])
+            source_matches = [
+                prim
                 for prim in find_matching_prims(walk_root)
                 if prim.GetPath().pathString == instance_root
                 or prim.GetPath().pathString.startswith(instance_root + "/")
             ]
+            if len(source_matches) == 1:
+                results = [(source_matches[0], path_expr)]
+            else:
+                results = [
+                    (prim, instance_expr + prim.GetPath().pathString[len(instance_root) :]) for prim in source_matches
+                ]
     if predicate is not None:
         results = [
             (child, dest + child.GetPath().pathString[len(source.GetPath().pathString) :])

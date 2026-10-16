@@ -15,7 +15,7 @@ from newton import GeoType, JointType, ModelBuilder, ShapeFlags
 from pxr import Usd, UsdGeom, UsdPhysics
 
 from isaaclab.cloner import path as clone_path
-from isaaclab.sim.utils.newton_model_utils import replace_newton_builder_shape_colors
+from isaaclab.sim.utils.newton_model_utils import replace_newton_builder_shape_colors, resolve_newton_shape_prim
 
 from isaaclab_newton.renderers.visual_material import import_builder_visual_material_paths
 
@@ -56,11 +56,10 @@ def _restore_visible_colliders_without_visual_shapes(
 ) -> None:
     """Show viewport-visible colliders on bodies without separate visual shapes.
 
-    Newton normally hides every collider when any visual-only shape exists in the
-    imported model. Isaac Lab procedural shapes use one default-purpose USD geometry
-    for both collision and visualization, so an unrelated visual asset must not hide
-    them. Imported collision meshes, guide-purpose collision geometry, and
-    colliders on bodies with separate visual shapes remain hidden.
+    Procedural meshes may use the same USD geometry for collision and rendering.
+    Their generated visual companions preserve authored topology after collision
+    approximation; the approximated hulls must stay hidden. Guide-purpose geometry
+    and dedicated colliders with separate authored visuals remain hidden.
 
     With ``load_visual_shapes=False`` the pass is skipped: Newton never hides a collider
     when the model holds no visual-only shapes, so every flag it would set is already set,
@@ -69,27 +68,43 @@ def _restore_visible_colliders_without_visual_shapes(
     """
     if not path_shape_map or not load_visual_shapes:
         return
-    # Newton may synthesize a visible ``*_visual`` mesh for a proxy-purpose collider.
-    # It is not an authored USD prim and must remain hidden alongside its source collider.
+    # Keep authored render topology when physics approximation creates a
+    # separate visual mesh. Dedicated colliders with independent visuals keep
+    # the existing hidden-collider policy.
+    generated_visual_sources = set()
+    static_owners_with_visual_shapes: dict[str, bool] = {}
     for index, path in enumerate(builder.shape_label):
         if not path.endswith("_visual") or stage.GetPrimAtPath(path):
             continue
-        collider_prim = stage.GetPrimAtPath(path.removesuffix("_visual"))
-        if collider_prim and collider_prim.HasAPI(UsdPhysics.CollisionAPI):
+        source = resolve_newton_shape_prim(stage, path)
+        if not source:
+            continue
+        source_path = str(source.GetPath())
+        owner_path = _static_collider_owner_path(stage, source_path)
+        if owner_path not in static_owners_with_visual_shapes:
+            static_owners_with_visual_shapes[owner_path] = _has_visible_non_collision_geometry(stage, owner_path)
+        imageable = UsdGeom.Imageable(source)
+        if (
+            imageable
+            and imageable.ComputeVisibility() != UsdGeom.Tokens.invisible
+            and imageable.ComputePurpose() in (UsdGeom.Tokens.default_, UsdGeom.Tokens.proxy)
+            and not static_owners_with_visual_shapes[owner_path]
+        ):
+            builder.shape_flags[index] |= ShapeFlags.VISIBLE
+            generated_visual_sources.add(source_path)
+        else:
             builder.shape_flags[index] &= ~ShapeFlags.VISIBLE
     bodies_with_visual_shapes = {
         builder.shape_body[index]
         for index, flags in enumerate(builder.shape_flags)
         if builder.shape_body[index] >= 0 and flags & ShapeFlags.VISIBLE and not flags & ShapeFlags.COLLIDE_SHAPES
     }
-    # Resolved on first use: a static parent whose colliders are all filtered out below is
-    # never traversed at all.
-    static_owners_with_visual_shapes: dict[str, bool] = {}
     for path, index in path_shape_map.items():
         flags = builder.shape_flags[index]
         body_index = builder.shape_body[index]
         if (
             not flags & ShapeFlags.COLLIDE_SHAPES
+            or path in generated_visual_sources
             or builder.shape_type[index] == GeoType.MESH
             or body_index in bodies_with_visual_shapes
         ):

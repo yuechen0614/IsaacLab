@@ -16,6 +16,8 @@ from newton.selection import ArticulationView
 
 from pxr import Usd, UsdGeom, UsdShade
 
+from isaaclab.sim.utils.newton_model_utils import resolve_newton_shape_prim
+
 if TYPE_CHECKING:
     from isaaclab.renderers.base_renderer import VisualMaterialBatch
 
@@ -33,7 +35,7 @@ def import_builder_visual_material_paths(builder: ModelBuilder, stage: Usd.Stage
     )
     paths = builder.custom_attributes["isaaclab:visual_material_path"].values
     for shape_index, shape_path in enumerate(builder.shape_label):
-        shape_prim = stage.GetPrimAtPath(shape_path)
+        shape_prim = resolve_newton_shape_prim(stage, shape_path)
         imageable = UsdGeom.Imageable(shape_prim)
         if not shape_prim.IsValid() or (imageable and imageable.ComputePurpose() == UsdGeom.Tokens.guide):
             continue

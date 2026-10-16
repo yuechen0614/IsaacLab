@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 import warp as wp
 
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from isaaclab.sim.utils.newton_model_utils import (
     _OMNIPBR_DEFAULTS,
@@ -448,3 +448,17 @@ def test_replace_newton_builder_shape_colors_skips_missing_prim_labels():
 
     assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 0
     assert tuple(builder.shape_color[0]) == pytest.approx(initial)
+
+
+def test_generated_visual_color_resolves_source_and_preserves_authored_suffix():
+    stage = Usd.Stage.CreateInMemory()
+    source = UsdGeom.Mesh.Define(stage, "/World/mesh")
+    UsdPhysics.CollisionAPI.Apply(source.GetPrim())
+    source.CreateDisplayColorAttr([(0.45, 0.32, 0.15)])
+    assert _resolve_shape_color(stage, "/World/mesh_visual", {}) == pytest.approx((0.45, 0.32, 0.15))
+
+    authored = UsdGeom.Mesh.Define(stage, "/World/mesh_visual")
+    authored.CreateDisplayColorAttr([(0.1, 0.2, 0.3)])
+    assert _resolve_shape_color(stage, "/World/mesh_visual", {}) == pytest.approx((0.1, 0.2, 0.3))
+    assert _resolve_shape_color(stage, "/World/missing_visual", {}) is None
+    assert _resolve_shape_color(stage, "/World/mesh_unrecognized_suffix", {}) is None

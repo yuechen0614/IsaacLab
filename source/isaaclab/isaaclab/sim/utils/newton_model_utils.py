@@ -18,9 +18,9 @@ from typing import Any
 
 import numpy as np
 
-from pxr import Usd, UsdGeom, UsdShade
+from pxr import Usd, UsdGeom, UsdPhysics, UsdShade
 
-__all__ = ["replace_newton_builder_shape_colors"]
+__all__ = ["replace_newton_builder_shape_colors", "resolve_newton_shape_prim"]
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,30 @@ def _linear_channel_to_srgb(c: float) -> float:
     if c >= 1.0:
         return 1.0
     return 1.055 * (c ** (1.0 / 2.4)) - 0.055
+
+
+def resolve_newton_shape_prim(stage: Usd.Stage, shape_path: str) -> Usd.Prim:
+    """Resolve an authored shape or Newton's generated mesh-visual companion.
+
+    Collision approximation preserves the source mesh as an un-authored
+    ``*_visual`` shape. Its appearance still belongs to the source collider.
+    An actual USD prim at that label always takes precedence.
+
+    Args:
+        stage: Stage that supplied the Newton model's geometry.
+        shape_path: Shape label authored by the USD importer.
+
+    Returns:
+        The authored prim, its generated companion's source collider, or an
+        invalid prim when neither exists.
+    """
+    prim = stage.GetPrimAtPath(shape_path)
+    if prim or not shape_path.endswith("_visual"):
+        return prim
+    source = stage.GetPrimAtPath(shape_path.removesuffix("_visual"))
+    if source and source.HasAPI(UsdPhysics.CollisionAPI):
+        return source
+    return prim
 
 
 def _canonical_prim_lookup_key(prim: Usd.Prim) -> str:
@@ -179,7 +203,7 @@ def _resolve_shape_color(
     Returns:
         Linear RGB to pass, or ``None`` to leave the row unchanged.
     """
-    shape_prim = stage.GetPrimAtPath(prim_path)
+    shape_prim = resolve_newton_shape_prim(stage, prim_path)
     if not shape_prim.IsValid():
         return None
 

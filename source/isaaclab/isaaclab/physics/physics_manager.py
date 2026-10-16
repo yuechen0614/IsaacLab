@@ -202,6 +202,13 @@ class PhysicsManager(ABC):
             )
         return new_root
 
+    @staticmethod
+    def _allocate_callback_id() -> int:
+        """Allocate from one process-wide counter shared by all backend classes."""
+        callback_id = PhysicsManager._callback_id
+        PhysicsManager._callback_id += 1
+        return callback_id
+
     @classmethod
     def register_callback(
         cls,
@@ -231,8 +238,7 @@ class PhysicsManager(ABC):
             >>> # Later, to remove:
             >>> handle.deregister()
         """
-        cid = cls._callback_id
-        cls._callback_id += 1
+        cid = PhysicsManager._allocate_callback_id()
 
         if wrap_weak_ref:
             callback = cls._wrap_weak_ref(callback)

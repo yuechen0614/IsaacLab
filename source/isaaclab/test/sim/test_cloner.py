@@ -369,6 +369,69 @@ def test_resolve_matching_prims_from_source_searches_only_plan_source(sim, monke
     ]
 
 
+@pytest.mark.parametrize("use_plan", [False, True])
+def test_resolve_matching_prims_from_source_preserves_unique_asset_names(sim, use_plan):
+    """A unique asset selector keeps its names and the predicate's child suffix."""
+    stage = sim_utils.get_current_stage()
+    for env_id in range(2):
+        root = f"/World/envs/env_{env_id}/Object_{env_id}"
+        stage.DefinePrim(root, "Xform")
+        stage.DefinePrim(root + "/Body", "Cube")
+    if use_plan:
+        sim.set_clone_plan(
+            ClonePlan(
+                sources=("/World/envs/env_0",),
+                destinations=("/World/envs/env_{}",),
+                clone_mask=np.ones((1, 2), dtype=np.bool_),
+                env_ids=np.arange(2, dtype=np.int64),
+                positions=np.zeros((2, 3), dtype=np.float32),
+            )
+        )
+    expression = "/World/envs/env_[01]/Object_[01]"
+    matches = queries.resolve_matching_prims_from_source(
+        expression, predicate=lambda prim: prim.IsA(UsdGeom.Cube), expected_num_matches=1
+    )
+    assert matches[0][0].GetPath().pathString == "/World/envs/env_0/Object_0/Body"
+    assert matches[0][1] == expression + "/Body"
+    concrete = "/World/envs/env_0/Object_0"
+    matches = queries.resolve_matching_prims_from_source(concrete, expected_num_matches=1)
+    assert matches[0][1] == concrete
+
+
+def test_resolve_matching_prims_from_source_keeps_multiple_stage_suffixes(sim):
+    """Multiple matches in a source instance still produce separate expressions."""
+    stage = sim_utils.get_current_stage()
+    for name in ("A", "B"):
+        stage.DefinePrim(f"/World/envs/env_0/Object_{name}", "Xform")
+    matches = queries.resolve_matching_prims_from_source("/World/envs/env_[01]/Object_[AB]", expected_num_matches=2)
+    assert [expression for _, expression in matches] == [
+        "/World/envs/env_[01]/Object_A",
+        "/World/envs/env_[01]/Object_B",
+    ]
+
+
+def test_resolve_matching_prims_from_source_finds_post_clone_asset(sim):
+    """An exact stage asset can exist only in a non-source environment."""
+    stage = sim_utils.get_current_stage()
+    stage.DefinePrim("/World/envs/env_0", "Xform")
+    path = "/World/envs/env_1/LateObject"
+    stage.DefinePrim(path, "Xform")
+    sim.set_clone_plan(
+        ClonePlan(
+            sources=("/World/envs/env_0",),
+            destinations=("/World/envs/env_{}",),
+            clone_mask=np.ones((1, 2), dtype=np.bool_),
+            env_ids=np.arange(2, dtype=np.int64),
+            positions=np.zeros((2, 3), dtype=np.float32),
+        )
+    )
+    matches = queries.resolve_matching_prims_from_source(path, expected_num_matches=1)
+    assert matches[0][0].GetPath().pathString == path
+    assert matches[0][1] == path
+    with pytest.raises(RuntimeError, match="Expected 1 prims.*found 0"):
+        queries.resolve_matching_prims_from_source(path + "/Missing", expected_num_matches=1)
+
+
 def test_make_clone_plan_heterogeneous_mutates_spawn_paths(sim):
     """Multi-variant spawners get per-variant spawn_paths and contribute multiple plan rows."""
     multi_cfg = SimpleNamespace(

@@ -98,6 +98,29 @@ def test_backend_ownership_has_no_service_locator_or_resource_keys():
     assert all("resource_key" not in cfg_type.__dataclass_fields__ for cfg_type in cfg_types)
 
 
+def test_callback_ids_remain_unique_across_backend_changes(monkeypatch):
+    """An old subclass handle cannot deregister a later base-manager callback."""
+
+    class FirstManager(PhysicsManager):
+        pass
+
+    monkeypatch.setattr(PhysicsManager, "_callbacks", {})
+    monkeypatch.setattr(PhysicsManager, "_callback_id", 0)
+    first = FirstManager.register_callback(lambda _: None, PhysicsEvent.PHYSICS_READY)
+    FirstManager.clear_callbacks()
+    current = PhysicsManager.register_callback(lambda _: None, PhysicsEvent.PHYSICS_READY)
+    first.deregister()
+    assert current.id > first.id
+    assert current.id in PhysicsManager._callbacks
+    counter = PhysicsManager._callback_id
+    PhysicsManager.clear_callbacks()
+    assert PhysicsManager._callback_id == counter
+    final = FirstManager.register_callback(lambda _: None, PhysicsEvent.PHYSICS_READY)
+    current.deregister()
+    assert final.id > current.id
+    assert final.id in PhysicsManager._callbacks
+
+
 def test_close_runs_all_live_stop_listeners_and_aggregates_failures(monkeypatch):
     """STOP fan-out and shared-state cleanup survive an individual listener failure."""
 

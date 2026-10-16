@@ -16,7 +16,7 @@ from isaaclab_newton.renderers.visual_material import (
 from newton import ModelBuilder
 from newton.selection import ArticulationView
 
-from pxr import Sdf, Usd, UsdGeom, UsdShade
+from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from isaaclab.renderers.base_renderer import VisualMaterialBatch
 
@@ -143,3 +143,23 @@ def test_shape_writer_samples_each_body_and_selected_environment_independently()
 def test_newton_renderer_exposes_shared_writer_factory() -> None:
     renderer = object.__new__(NewtonWarpRenderer)
     assert renderer.visual_material_writer.__func__.__name__ == "create_visual_material_writer"
+
+
+def test_generated_mesh_material_binding_resolves_source_but_authored_suffix_wins():
+    stage = Usd.Stage.CreateInMemory()
+    source = UsdGeom.Mesh.Define(stage, "/World/mesh")
+    UsdPhysics.CollisionAPI.Apply(source.GetPrim())
+    source_material = UsdShade.Material.Define(stage, "/Looks/source")
+    UsdShade.MaterialBindingAPI.Apply(source.GetPrim()).Bind(source_material)
+    builder = ModelBuilder()
+    builder.add_shape_box(-1, label="/World/mesh_visual")
+    import_builder_visual_material_paths(builder, stage)
+    assert builder.custom_attributes["isaaclab:visual_material_path"].values[0] == "/Looks/source"
+
+    authored = UsdGeom.Mesh.Define(stage, "/World/mesh_visual")
+    own_material = UsdShade.Material.Define(stage, "/Looks/authored")
+    UsdShade.MaterialBindingAPI.Apply(authored.GetPrim()).Bind(own_material)
+    builder = ModelBuilder()
+    builder.add_shape_box(-1, label="/World/mesh_visual")
+    import_builder_visual_material_paths(builder, stage)
+    assert builder.custom_attributes["isaaclab:visual_material_path"].values[0] == "/Looks/authored"

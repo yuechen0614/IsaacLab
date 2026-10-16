@@ -682,8 +682,7 @@ class PhysxManager(PhysicsManager):
     ) -> CallbackHandle:
         """Register a callback. Accepts both PhysicsEvent and IsaacEvents."""
         if isinstance(event, IsaacEvents):
-            cid = cls._callback_id
-            cls._callback_id += 1
+            cid = PhysicsManager._allocate_callback_id()
             cb = cls._wrap_weak_ref(callback) if wrap_weak_ref else callback
             sub = cls._subscribe_isaac(cb, event, order, name)
             cls._callbacks[cid] = (event, cb, order, name, sub)

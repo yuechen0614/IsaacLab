@@ -8,6 +8,7 @@
 from types import SimpleNamespace
 
 import newton
+import pytest
 from isaaclab_newton.cloner import newton_clone_utils
 from isaaclab_newton.cloner.newton_clone_utils import build_source_builders
 from newton import ShapeFlags
@@ -141,19 +142,52 @@ class TestClonerVisualShapeImport:
 
         assert builder.shape_flags[0] & ShapeFlags.VISIBLE
 
-    def test_generated_proxy_collider_visual_remains_hidden(self):
-        """Newton's unauthored visual companion must not expose a proxy collider."""
+    @pytest.mark.parametrize(
+        "purpose,visible,separate_visual,expected",
+        [
+            ("default", True, False, True),
+            ("proxy", True, False, True),
+            ("guide", True, False, False),
+            ("default", False, False, False),
+            ("default", True, True, False),
+        ],
+    )
+    def test_generated_visual_obeys_source_and_separate_visual_policy(
+        self, purpose, visible, separate_visual, expected
+    ):
+        """Only drawable standalone collider topology owns a visible companion."""
         stage = Usd.Stage.CreateInMemory()
-        collider = UsdGeom.Cube.Define(stage, f"{_SOURCE}/collision")
+        collider = UsdGeom.Mesh.Define(stage, f"{_SOURCE}/collision")
         UsdPhysics.CollisionAPI.Apply(collider.GetPrim())
+        collider.CreatePurposeAttr(purpose)
+        collider.CreateVisibilityAttr("inherited" if visible else "invisible")
+        if separate_visual:
+            UsdGeom.Mesh.Define(stage, f"{_SOURCE}/authored_mesh")
         collider_path = str(collider.GetPrim().GetPath())
         builder = SimpleNamespace(
             shape_body=[-1, -1],
             shape_flags=[ShapeFlags.COLLIDE_SHAPES, ShapeFlags.VISIBLE],
             shape_label=[collider_path, f"{collider_path}_visual"],
-            shape_type=[newton.GeoType.BOX, newton.GeoType.MESH],
+            shape_type=[newton.GeoType.CONVEX_MESH, newton.GeoType.MESH],
         )
-
         newton_clone_utils._restore_visible_colliders_without_visual_shapes(builder, stage, {collider_path: 0})
+        assert bool(builder.shape_flags[1] & ShapeFlags.VISIBLE) is expected
+        assert not builder.shape_flags[0] & ShapeFlags.VISIBLE
 
-        assert not builder.shape_flags[1] & ShapeFlags.VISIBLE
+    def test_authored_visual_suffix_is_not_treated_as_generated(self):
+        stage = Usd.Stage.CreateInMemory()
+        collider = UsdGeom.Mesh.Define(stage, f"{_SOURCE}/collision")
+        UsdPhysics.CollisionAPI.Apply(collider.GetPrim())
+        collider.CreateVisibilityAttr("invisible")
+        authored_path = f"{_SOURCE}/collision_visual"
+        UsdGeom.Mesh.Define(stage, authored_path)
+        builder = SimpleNamespace(
+            shape_body=[-1, -1],
+            shape_flags=[ShapeFlags.COLLIDE_SHAPES, ShapeFlags.VISIBLE],
+            shape_label=[str(collider.GetPath()), authored_path],
+            shape_type=[newton.GeoType.CONVEX_MESH, newton.GeoType.MESH],
+        )
+        newton_clone_utils._restore_visible_colliders_without_visual_shapes(
+            builder, stage, {str(collider.GetPath()): 0}
+        )
+        assert builder.shape_flags[1] & ShapeFlags.VISIBLE
