@@ -459,23 +459,25 @@ def _get_physics_backend_name(physics_cfg: PhysicsCfg | None) -> str:
         if solver_name is None:
             raise ValueError(f"Unsupported Newton solver for pretrained checkpoints: {type(solver_cfg).__name__}")
         return f"newton{solver_name}"
+    # OVPhysX configs match too: they run the same PhysX engine, so they share the PhysX checkpoints
     if "physx" in type_path:
         return "physx"
     raise ValueError(f"Unable to identify physics backend from {type(physics_cfg).__name__}")
 
 
 def _get_newton_solver_name(solver_cfg) -> str | None:
-    """Return the checkpoint name of a Newton solver config, or ``None`` when unpublished.
+    """Return the checkpoint name of a Newton solver config, or ``None`` without one.
 
-    A coupled solver is named by its entry solvers in order followed by its coupling
-    scheme, so a proxy coupler over MJWarp and VBD entries gives ``mjwarpvbdproxy``.
+    A solver is named by its config class without ``SolverCfg``, so ``KaminoPADMMSolverCfg``
+    gives ``kaminopadmm``. A coupled solver is named by its entry solvers in order followed by
+    its coupling scheme, so a proxy coupler over MJWarp and VBD entries gives ``mjwarpvbdproxy``.
     """
     if solver_cfg is None:
         return None
     class_name = type(solver_cfg).__name__
     entries = getattr(solver_cfg, "entries", None)
     if entries is None:
-        return "mjwarp" if "mjwarp" in class_name.lower() else None
+        return class_name.removesuffix("SolverCfg").lower()
     families = (type(entry.solver_cfg).__name__.removesuffix("SolverCfg").lower() for entry in entries)
     return "".join(families) + class_name.removeprefix("Coupler").removesuffix("Cfg").lower()
 

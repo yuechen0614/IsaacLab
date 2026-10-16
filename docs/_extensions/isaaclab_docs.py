@@ -7,16 +7,20 @@
 
 from __future__ import annotations
 
+import csv
+import inspect
 import json
 import posixpath
 from html import escape
 import re
+import sys
 from pathlib import Path
 
 from docutils import nodes
 from docutils.parsers.rst import directives
 from docutils.statemachine import StringList
 from sphinx.application import Sphinx
+from sphinx.config import Config
 from sphinx.util.docutils import SphinxDirective, SphinxRole
 from sphinx.util.nodes import split_explicit_title
 
@@ -39,6 +43,39 @@ def _source_branch(config) -> str:
     return getattr(config, "isaaclab_latest_branch", "develop")
 
 
+def _configure_source_links(app: Sphinx, config: Config) -> None:
+    """Link API objects to their implementation in the documented Git ref."""
+    root = Path(app.srcdir).resolve().parent
+    branch = _source_branch(config)
+
+    def resolve(domain: str, info: dict[str, str]) -> str | None:
+        if domain != "py":
+            return None
+        try:
+            name, *members = info["fullname"].split(".")
+            obj = getattr(sys.modules[info["module"]], name)
+            for member in members:
+                obj = inspect.getattr_static(obj, member)
+            if isinstance(obj, property):
+                obj = obj.fget
+            elif isinstance(obj, (classmethod, staticmethod)):
+                obj = obj.__func__
+            obj = inspect.unwrap(obj)
+            filename = inspect.getsourcefile(obj)
+            if filename is None:
+                return None
+            path = Path(filename).resolve().relative_to(root)
+            if path.parts[0] != "source":
+                return None
+            lines, start = inspect.getsourcelines(obj)
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            # External, mocked, or generated objects may have no repository source.
+            return None
+        return f"https://github.com/isaac-sim/IsaacLab/blob/{branch}/{path.as_posix()}#L{start}-L{start + len(lines) - 1}"
+
+    config.linkcode_resolve = resolve
+
+
 def _parse_rst(directive: SphinxDirective, content: str) -> list[nodes.Node]:
     """Parse nested reST and return the generated document nodes."""
     source = directive.env.doc2path(directive.env.docname, base=False)
@@ -46,6 +83,22 @@ def _parse_rst(directive: SphinxDirective, content: str) -> list[nodes.Node]:
     container = nodes.container()
     directive.state.nested_parse(lines, 0, container)
     return container.children
+
+
+class IsaacLabBenchmarkData(SphinxDirective):
+    """Embed benchmark snapshots so downloaded HTML works without an HTTP server."""
+
+    def run(self) -> list[nodes.Node]:
+        snapshots = {}
+        for channel in ("release", "develop"):
+            path = Path(self.env.srcdir) / "source/_static/benchmarks" / f"environment-performance-{channel}.csv"
+            self.env.note_dependency(str(path))
+            with path.open(encoding="utf-8", newline="") as stream:
+                snapshots[channel] = list(csv.DictReader(stream))
+        # Prevent CSV text from closing the script element, even inside a JSON string.
+        payload = json.dumps(snapshots).replace("<", "\\u003c")
+        html = f'<script type="application/json" data-environment-benchmark-rows>{payload}</script>'
+        return [nodes.raw("", html, format="html")]
 
 
 class IsaacLabCloneCommands(SphinxDirective):
@@ -230,6 +283,7 @@ class IsaacLabUvIsaacSimWheelInstall(SphinxDirective):
    uv pip install "isaaclab[isaacsim]=={self.config.isaaclab_wheel_version}" \\
      --overrides "{overrides_url}" \\
      --extra-index-url https://pypi.nvidia.com \\
+     --torch-backend cu130 \\
      --index-strategy unsafe-best-match
 """
         return _parse_rst(self, content)
@@ -251,6 +305,7 @@ class IsaacLabUvImportersWheelInstall(SphinxDirective):
    uv pip install "isaaclab[importers]=={self.config.isaaclab_wheel_version}" \\
      --overrides "{overrides_url}" \\
      --index https://pypi.nvidia.com \\
+     --torch-backend cu130 \\
      --index-strategy unsafe-best-match
 """
         return _parse_rst(self, content)
@@ -361,8 +416,10 @@ def _write_doc_redirects(app: Sphinx, exception: Exception | None) -> None:
             doc, separator, anchor = route.partition("#")
             page = Path(app.builder.get_outfilename(doc))
             if not page.is_file():
+                if is_multiversion_build:
+                    continue
                 raise ValueError(f"Documentation redirect target was not built: {doc}")
-            sections[f"#{fragment}"] = [
+            sections[f"#{fragment}" if fragment else ""] = [
                 posixpath.relpath(page.as_posix(), output.parent.as_posix()), separator + anchor
             ]
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -383,6 +440,7 @@ def setup(app):
     app.add_config_value("isaaclab_doc_redirects", {}, "html")
     app.add_config_value("isaaclab_doc_redirect_fragments", {}, "html")
     app.connect("build-finished", _write_doc_redirects)
+    app.connect("config-inited", _configure_source_links)
     app.add_config_value("isaaclab_latest_branch", "develop", "env")
     app.add_config_value("isaaclab_wheel_version", "", "env")
     app.add_config_value("isaaclab_wheel_source_tag", "", "env")
@@ -391,6 +449,7 @@ def setup(app):
     app.add_config_value("torchvision_version", "", "env")
     app.add_config_value("ovrtx_spec", "", "env")
     app.add_role("isaaclab-source", IsaacLabSourceLink())
+    app.add_directive("isaaclab-benchmark-data", IsaacLabBenchmarkData)
     app.add_directive("isaaclab-clone-commands", IsaacLabCloneCommands)
     app.add_directive("isaaclab-clone-https", IsaacLabCloneHttps)
     app.add_directive("isaaclab-kitless-install-snippet", IsaacLabKitlessInstallSnippet)

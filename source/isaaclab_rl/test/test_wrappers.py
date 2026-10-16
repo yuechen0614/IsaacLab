@@ -19,7 +19,7 @@ _NUM_ENVS = 2
 _EPISODE_STEPS = 3
 
 
-def _wrap_env(library: str, env: Any) -> Any:
+def _wrap_env(library: str, env: Any, device: str | None = None) -> Any:
     if library == "rsl_rl":
         from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
@@ -40,12 +40,12 @@ def _wrap_env(library: str, env: Any) -> Any:
         pytest.importorskip("torchrl")
         from isaaclab_rl.torchrl import IsaacLabTorchRLWrapper
 
-        return IsaacLabTorchRLWrapper(env)
+        return IsaacLabTorchRLWrapper(env, device=device)
     raise ValueError(f"Unsupported RL library: {library}")
 
 
 @pytest.fixture
-def raw_env(task: str, library: str, finite_horizon: bool) -> Iterator[Any]:
+def raw_env(task: str, finite_horizon: bool, compute_final_obs: bool) -> Iterator[Any]:
     import gymnasium as gym
     from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 
@@ -59,8 +59,8 @@ def raw_env(task: str, library: str, finite_horizon: bool) -> Iterator[Any]:
     cfg.episode_length_s = _EPISODE_STEPS * cfg.decimation * cfg.sim.dt
     cfg.seed = 42
     cfg.is_finite_horizon = finite_horizon
-    cfg.compute_final_obs = library == "torchrl"
-    with launch_simulation(cfg, {"headless": True, "visualizer": None, "visualizer_explicit": True}):
+    cfg.compute_final_obs = compute_final_obs
+    with launch_simulation(cfg, {"headless": True, "visualizer": ["none"]}):
         env = gym.make(task, cfg=cfg)
         try:
             yield env
@@ -68,21 +68,32 @@ def raw_env(task: str, library: str, finite_horizon: bool) -> Iterator[Any]:
             env.close()
 
 
+# Only the RSL-RL wrapper branches on manager-based vs direct envs, so the task rotates across rows
+# instead of crossing every library.
 @pytest.mark.parametrize(
-    ("library", "finite_horizon"),
+    ("library", "finite_horizon", "task", "wrapper_device", "compute_final_obs"),
     [
-        ("rsl_rl", False),
-        ("rsl_rl", True),
-        ("rl_games", False),
-        ("sb3", False),
-        ("skrl", False),
-        ("torchrl", False),
-        ("torchrl", True),
+        ("rsl_rl", False, "Isaac-Cartpole", None, False),
+        ("rsl_rl", True, "Isaac-Cartpole-Direct", None, False),
+        ("rl_games", False, "Isaac-Cartpole", None, False),
+        ("sb3", False, "Isaac-Cartpole", None, False),
+        ("skrl", False, "Isaac-Cartpole-Direct", None, False),
+        ("torchrl", False, "Isaac-Cartpole", None, True),
+        ("torchrl", True, "Isaac-Cartpole-Direct", "cpu", True),
+        ("torchrl", False, "Isaac-Cartpole", "cpu", False),
     ],
 )
-@pytest.mark.parametrize("task", ["Isaac-Cartpole", "Isaac-Cartpole-Direct"])
-def test_wrapper_reset_step_and_timeout(library: str, finite_horizon: bool, raw_env: Any) -> None:
-    env = _wrap_env(library, raw_env)
+def test_wrapper_reset_step_and_timeout(
+    library: str, finite_horizon: bool, wrapper_device: str | None, compute_final_obs: bool, raw_env: Any
+) -> None:
+    if library == "sb3":
+        assert not raw_env.unwrapped.single_action_space.is_bounded("both")
+    env = _wrap_env(library, raw_env, device=wrapper_device)
+    if library == "sb3":
+        # SB3 sees normalized bounds without modifying the underlying environment.
+        np.testing.assert_array_equal(env.action_space.low, -1.0)
+        np.testing.assert_array_equal(env.action_space.high, 1.0)
+        assert not raw_env.unwrapped.single_action_space.is_bounded("both")
     _assert_finite(env.reset())
     if library == "torchrl":
         from torchrl.envs.utils import check_env_specs
@@ -90,13 +101,21 @@ def test_wrapper_reset_step_and_timeout(library: str, finite_horizon: bool, raw_
         check_env_specs(env)
         with torch.inference_mode():
             rollout = env.rollout(_EPISODE_STEPS + 1, break_when_any_done=False)
-        _assert_finite(rollout)
+        for value in rollout.values(include_nested=True, leaves_only=True):
+            assert value.device == env.device
+        _assert_finite(rollout.exclude(("next", "policy")))
         rewards = rollout["next", "reward"]
         dones = rollout["next", "done"]
         assert rewards.shape[:2] == dones.shape[:2] == (_NUM_ENVS, _EPISODE_STEPS + 1)
         assert torch.equal(dones, rollout["next", "terminated"] | rollout["next", "truncated"])
         assert bool(dones.any()), "The short episode must exercise automatic reset"
         assert bool(rollout["next", "truncated"].any()) is not finite_horizon
+        next_obs = rollout["next", "policy"]
+        if compute_final_obs:
+            _assert_finite(next_obs)
+        else:
+            assert torch.equal(torch.isnan(next_obs), dones.expand_as(next_obs))
+            _assert_finite(next_obs[~dones.squeeze(-1)])
         return
     if library == "rsl_rl":
         _assert_observation_buffer(env)
@@ -143,22 +162,6 @@ def test_torchrl_actor_uses_unbatched_action_bounds() -> None:
     batch = TensorDict({"policy": torch.randn(6, 4)}, batch_size=[6])
 
     assert actor(batch)["action"].shape == (6, 1)
-
-
-@pytest.mark.parametrize("library", ["sb3"])
-@pytest.mark.parametrize("finite_horizon", [False])
-@pytest.mark.parametrize("task", ["Isaac-Cartpole"])
-def test_sb3_normalizes_unbounded_action_space(raw_env: Any) -> None:
-    """Expose normalized bounds to SB3 without modifying the underlying environment."""
-    from isaaclab_rl.sb3 import Sb3VecEnvWrapper
-
-    assert not raw_env.unwrapped.single_action_space.is_bounded("both")
-
-    env = Sb3VecEnvWrapper(raw_env)
-
-    np.testing.assert_array_equal(env.action_space.low, -1.0)
-    np.testing.assert_array_equal(env.action_space.high, 1.0)
-    assert not raw_env.unwrapped.single_action_space.is_bounded("both")
 
 
 def _assert_observation_buffer(env: Any) -> None:

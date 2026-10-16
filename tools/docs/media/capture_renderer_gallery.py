@@ -41,7 +41,10 @@ _RTX_ONLY_MODES = (
 _RENDERER_SLUGS = {"newton": "newton", "ovrtx": "ovrtx", "isaac_rtx": "isaac-rtx"}
 _SIMPLE_SHADING_MODES = tuple(mode.output_name for mode in _RTX_ONLY_MODES if mode.output_name.startswith("simple_"))
 _OVRTX_AMBIENT_LIGHT_SETTING = "float omni:rtx:rt:ambientLight:intensity = 1.0"
-_DEFAULT_GALLERY_SCENE = "omniverse://isaac-dev.ov.nvidia.com/Isaac/IsaacLab/Docs/Renderers/renderer_gallery_scene.usda"
+_DEFAULT_GALLERY_SCENE = (
+    "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Docs/"
+    "Renderers/renderer_gallery_scene.usda"
+)
 
 
 def gallery_modes(renderer: str) -> tuple[GalleryMode, ...]:
@@ -175,8 +178,8 @@ def gallery_stage_paths() -> tuple[str, str]:
 
 
 def resolve_gallery_scene(scene: str) -> str:
-    """Preserve a Nucleus URI or resolve and validate a local scene path."""
-    if scene.startswith("omniverse://"):
+    """Preserve a remote URI or resolve and validate a local scene path."""
+    if scene.startswith(("https://", "omniverse://")):
         return scene
 
     scene_path = Path(scene).expanduser().resolve()
@@ -186,7 +189,7 @@ def resolve_gallery_scene(scene: str) -> str:
 
 
 def add_gallery_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add renderer-gallery arguments without colliding with AppLauncher options."""
+    """Add renderer-gallery arguments without colliding with the simulation launcher options."""
     script_dir = Path(__file__).resolve().parent
     parser.add_argument("--renderer-backend", choices=tuple(_RENDERER_SLUGS), required=True)
     parser.add_argument("--capture-group", choices=("standard", *_SIMPLE_SHADING_MODES), default="standard")
@@ -206,11 +209,11 @@ def add_gallery_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _parse_args() -> argparse.Namespace:
     """Parse capture and Isaac Lab launcher arguments."""
-    from isaaclab.app import AppLauncher
+    from isaaclab.app import add_launcher_args
 
     parser = argparse.ArgumentParser(description=__doc__)
     add_gallery_arguments(parser)
-    AppLauncher.add_app_launcher_args(parser)
+    add_launcher_args(parser)
     parser.set_defaults(enable_cameras=True, headless=True)
     args = parser.parse_args()
     args.output_dir = args.output_dir.expanduser().resolve()
@@ -298,6 +301,7 @@ def _capture(args: argparse.Namespace) -> None:
     from isaaclab.assets import AssetBaseCfg
     from isaaclab.envs.utils.camera_colorizer import CameraFrameColorizer
     from isaaclab.sensors import Camera, CameraCfg
+    from isaaclab.utils import instantiate
 
     if renderer_requires_kit(args.renderer_backend):
         sim_cfg = sim_utils.SimulationCfg(dt=1.0 / 60.0, render_interval=1, device=args.device, use_fabric=True)
@@ -318,7 +322,7 @@ def _capture(args: argparse.Namespace) -> None:
     clone_plan = cloner.clone_plan_from_env_0(
         cloner.CloneCfg(), (scene_cfg,), 1, 0.0, positions=np.zeros((1, 3), dtype=np.float32)
     )
-    scene_cfg.class_type(scene_cfg)
+    instantiate(scene_cfg)
     cloner.replicate(clone_plan)
     camera = _create_camera_and_reset(
         args.renderer_backend,
@@ -417,18 +421,16 @@ def _capture(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """Launch Isaac Sim and capture the selected renderer gallery group."""
-    from isaaclab.app import AppLauncher
+    from isaaclab.app import launch_simulation
 
     args = _parse_args()
     if not renderer_requires_kit(args.renderer_backend):
         _capture(args)
     else:
-        app_launcher = AppLauncher(args)
-        simulation_app = app_launcher.app
-        try:
+        # the capture builds its simulation config after launch, so request Kit explicitly
+        args.require_kit = True
+        with launch_simulation(None, args):
             _capture(args)
-        finally:
-            simulation_app.close()
 
 
 if __name__ == "__main__":

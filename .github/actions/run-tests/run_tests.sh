@@ -38,6 +38,7 @@ run_tests() {
   local warp_cache_host_dir="${25}"
   local extra_uv_packages="${26}"
   local ovrtx_shader_cache_host_dir="${27}"
+  local test_jobs="${28}"
   local logs_pid=""
   local wait_pid=""
   local docker_wait_file="/tmp/.docker_exit_${container_name}"
@@ -194,10 +195,18 @@ run_tests() {
     echo "Setting per-file pytest -k expression: $test_k_expr"
   fi
 
+  if [ -n "$test_jobs" ]; then
+    docker_env_args+=(-e "TEST_JOBS=$test_jobs")
+    echo "Setting TEST_JOBS=$test_jobs"
+  fi
+
   if [ -n "$ci_marker" ]; then
     docker_env_args+=(-e "CI_MARKER=$ci_marker")
     echo "Setting CI_MARKER=$ci_marker"
   fi
+
+  # Set by the multi-GPU smoke steps: fail rather than skip on a runner with too few GPUs.
+  [ -z "${ISAACLAB_TEST_REQUIRE_MULTI_GPU:-}" ] || docker_env_args+=(-e ISAACLAB_TEST_REQUIRE_MULTI_GPU)
 
   if [ -n "$standalone_script_scope" ]; then
     docker_env_args+=(
@@ -243,6 +252,8 @@ run_tests() {
       "${docker_runtime_dir}/isaac-sim/pkg"
     docker_volume_args=(
       -v "${volume_mount_source}:/workspace/isaaclab:rw"
+      # Hide .git as the images do: the checkout's config requires Git LFS, which they do not ship.
+      --tmpfs /workspace/isaaclab/.git
       -v "${docker_runtime_dir}/home:/tmp/isaaclab-ci-home:rw"
       -v "${docker_runtime_dir}/isaac-sim/kit/cache:/isaac-sim/kit/cache:rw"
       -v "${docker_runtime_dir}/isaac-sim/kit/data:/isaac-sim/kit/data:rw"
@@ -276,7 +287,7 @@ run_tests() {
 
   if [ -n "$ovrtx_shader_cache_host_dir" ]; then
     # Canonical OVRTX shader cache mount layout; other boundaries refer here.
-    #   host kit/     -> /isaac-sim/kit/cache/nv_shadercache  (Kit / AppLauncher rendering)
+    #   host kit/     -> /isaac-sim/kit/cache/nv_shadercache  (Kit rendering)
     #   host kitless/ -> OVRTX_SHADER_CACHE_PATH              (standalone OVRTXRenderer)
     #
     # kit/ is a nested bind mount overlaying the nv_shadercache directory that the

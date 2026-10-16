@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 import tomllib
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 pytestmark = pytest.mark.unit
 
@@ -33,6 +35,29 @@ def test_uv_run_extra_names_match_documented_workflow(source_checkout_root: Path
     assert documented_extras <= set(optional_dependencies)
 
 
+def test_published_wheel_docs_cover_one_off_and_managed_uv_workflows(source_checkout_root: Path):
+    """Published workflows must cover isolated execution and a persistent uv project."""
+    docs = (source_checkout_root / "docs/source/setup/installation/index.rst").read_text(encoding="utf-8")
+    published_docs = docs.split("Installing the published wheel", maxsplit=1)[1].split("Optional extras", maxsplit=1)[0]
+    project_docs = published_docs.split("uv project dependency", maxsplit=1)[1].split(
+        "Standalone uv environment", maxsplit=1
+    )[0]
+    windows_docs = published_docs.split("Windows (x86_64)", maxsplit=1)[1].split("Linux (aarch64)", maxsplit=1)[0]
+
+    assert "uvx --index https://pypi.nvidia.com" in published_docs
+    assert '--from "isaaclab==3.0.0rc1"' in published_docs
+    assert "--torch-backend cu130" in published_docs
+    assert "uv init --python 3.12 my_isaaclab_project" in project_docs
+    assert project_docs.count("--index-strategy unsafe-best-match") == 2
+    assert "--index pytorch-cu130=https://download.pytorch.org/whl/cu130" in project_docs
+    assert "torch==2.11.0 torchvision==0.26.0" in project_docs
+    assert "--index nvidia=https://pypi.nvidia.com" in project_docs
+    assert "isaaclab==3.0.0rc1" in project_docs
+    assert "git+" not in published_docs
+    assert "[tool.uv.sources]" not in published_docs
+    assert "--torch-backend cu130" in windows_docs
+
+
 def test_uv_run_exposes_centralized_feature_extras(source_checkout_root: Path):
     """The root project centralizes optional third-party deps into named extras."""
     optional_dependencies = _root_pyproject(source_checkout_root)["project"]["optional-dependencies"]
@@ -43,6 +68,7 @@ def test_uv_run_exposes_centralized_feature_extras(source_checkout_root: Path):
         "dev",
         "sb3",
         "skrl",
+        "skrl-jax",
         "rl-games",
         "wandb",
         "rsl-rl",
@@ -65,16 +91,14 @@ def test_uv_run_exposes_centralized_feature_extras(source_checkout_root: Path):
     assert "rtx" not in optional_dependencies
 
     # Concrete third-party deps live in the extras (not subpackage self-references).
-    # ``ov`` installs both Omniverse backends; ``ovphysx`` / ``ovrtx`` select one.
-    # Every Omniverse extra carries ``ovstage``, which both backends need.
+    # ``ov`` installs both Omniverse backends and ``ovstage``, which both backends need.
+    # The single-backend ``ovphysx`` / ``ovrtx`` extras are checked against the pinned versions below.
     assert any(dep.startswith("skrl") for dep in optional_dependencies["skrl"])
+    assert any(dep.startswith("jax[cuda13]") for dep in optional_dependencies["skrl-jax"])
+    assert any(dep.startswith("skrl[jax]") for dep in optional_dependencies["skrl-jax"])
     assert any(dep.startswith("ovphysx") for dep in optional_dependencies["ov"])
     assert any(dep.startswith("ovrtx") for dep in optional_dependencies["ov"])
     assert any(dep.startswith("ovstage") for dep in optional_dependencies["ov"])
-    assert any(dep.startswith("ovphysx") for dep in optional_dependencies["ovphysx"])
-    assert any(dep.startswith("ovstage") for dep in optional_dependencies["ovphysx"])
-    assert any(dep.startswith("ovrtx") for dep in optional_dependencies["ovrtx"])
-    assert any(dep.startswith("ovstage") for dep in optional_dependencies["ovrtx"])
 
 
 def test_all_extra_aggregates_curated_ov_rl_and_visualizer_extras(source_checkout_root: Path):
@@ -90,6 +114,7 @@ def test_all_extra_aggregates_curated_ov_rl_and_visualizer_extras(source_checkou
     assert set(optional) - reachable - {"all"} == {
         "rlinf",
         "torchrl",
+        "skrl-jax",
         "isaacsim",
         "importers",
         "mimic",
@@ -130,11 +155,8 @@ def test_version_single_source_matches_literal_pins(source_checkout_root: Path):
     optional = pyproject["project"]["optional-dependencies"]
     overrides = pyproject["tool"]["uv"]["override-dependencies"]
 
-    assert versions["ovphysx"] == "0.6.3"
-    assert "omniverseclient==2.74.0" in dependencies
-
-    # Isaac Sim extra mirrors the table; it is the only place the wheel is pinned.
-    assert optional["isaacsim"] == [f"isaacsim[all,extscache]=={versions['isaacsim']}"]
+    # Isaac Sim requirement mirrors the table; the extra is the only place the wheel is pinned.
+    assert f"isaacsim[all,extscache]=={versions['isaacsim']}" in optional["isaacsim"]
 
     # OV extras mirror the table. Table values may be an exact version ("1.2.3",
     # mirrored as ``pkg==1.2.3``) or a range spec (">=1.2.3", mirrored as ``pkg>=1.2.3``).
@@ -152,7 +174,7 @@ def test_version_single_source_matches_literal_pins(source_checkout_root: Path):
     # either by carrying the literal range, or by referencing the ``resolve-ov-pins``
     # action output, which reads the pin from this same table. Never a bare ``ovrtx``.
     build_workflow = (source_checkout_root / ".github/workflows/build.yaml").read_text(encoding="utf-8")
-    assert "ovphysx==0.4.13" not in build_workflow
+    assert all(pin == spec("ovphysx") for pin in re.findall(r"ovphysx==[\w.+]+", build_workflow))
     ovrtx_install_lines = [
         line.strip() for line in build_workflow.splitlines() if "extra-pip-packages:" in line and "ovrtx" in line
     ]
@@ -160,12 +182,13 @@ def test_version_single_source_matches_literal_pins(source_checkout_root: Path):
     assert all(spec("ovrtx") in line or "steps.ov_pins.outputs.ovrtx" in line for line in ovrtx_install_lines)
 
     # Direct torch-stack pins apply to both source and wheel installations.
-    for package in ("torch", "torchvision", "torchaudio"):
+    for package in ("torch", "torchvision"):
         assert f"{package}=={versions[package]}" in dependencies
 
-    # The Newton uv override is its single pin and may select a release or Git revision.
-    newton_spec = next(requirement for requirement in overrides if requirement.startswith("newton[sim]"))
-    assert "==" in newton_spec or " @ git+" in newton_spec
+    # Newton uses the same exact PyPI release for source and wheel installations.
+    newton_spec = f"newton[sim]=={versions['newton']}"
+    assert newton_spec in dependencies
+    assert newton_spec in overrides
 
     # warp-lang is a core dependency whose table value may be an exact pin
     # ("1.2.3" -> ``==``) or a range (">=1.2.3" -> mirrored verbatim).
@@ -193,14 +216,26 @@ def test_uv_run_declares_no_extra_conflicts(source_checkout_root: Path):
     """No extra is forked: every combination resolves into a single environment.
 
     ``[tool.uv].conflicts`` used to fork ``isaacsim`` / ``teleop`` away from the OV runtimes,
-    and briefly away from the standalone importers. The remaining ``packaging`` override reconciles
-    ovphysx. The importers install beside Isaac Sim without displacing it: the two distributions share
-    no files, and Kit serves ``isaacsim.asset`` from its extension roots either way.
+    and briefly away from the standalone importers. The remaining dependency overrides reconcile
+    packages whose Isaac Sim pins lag the standalone stack. The importers install beside Isaac Sim
+    without displacing it: the two distributions share no files, and Kit serves ``isaacsim.asset``
+    from its extension roots either way.
     """
     tool_uv = _root_pyproject(source_checkout_root)["tool"]["uv"]
 
     assert "conflicts" not in tool_uv
+    assert "fsspec>=2026.6.0" in tool_uv["override-dependencies"]
     assert "packaging>=20,<27" in tool_uv["override-dependencies"]
+    assert "urllib3>=2.8.0" in tool_uv["override-dependencies"]
+
+
+def test_rl_games_aiohttp_requirement_uses_security_floor(source_checkout_root: Path):
+    """The aggregate RL extra must reject vulnerable aiohttp versions."""
+    optional = _root_pyproject(source_checkout_root)["project"]["optional-dependencies"]
+    aiohttp = next(Requirement(dependency) for dependency in optional["rl-games"] if dependency.startswith("aiohttp"))
+
+    assert Version("3.14.2") not in aiohttp.specifier
+    assert Version("3.14.3") in aiohttp.specifier
 
 
 def test_uv_run_isaacsim_is_an_opt_in_extra(source_checkout_root: Path):

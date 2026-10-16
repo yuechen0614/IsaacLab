@@ -22,8 +22,10 @@ import gymnasium as gym
 import torch
 
 from isaaclab.app import add_launcher_args, launch_simulation
+from isaaclab.envs import DirectMARLEnvCfg
 from isaaclab.envs.utils.spaces import sample_space
 from isaaclab.utils import math as math_utils
+from isaaclab.utils import validate
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
@@ -32,6 +34,7 @@ from .common import (
     add_video_args,
     apply_env_overrides,
     apply_video_recording,
+    close_env,
     enable_cameras_for_video,
     normalize_task_name,
     video_playback_steps,
@@ -77,36 +80,34 @@ def run(argv: list[str] | None = None, *, policy: PolicyName) -> None:
     apply_video_recording(env_cfg, log_dir, args_cli, subdir="play")
     # reject unsupported configurations before launching Kit or initializing a native physics backend
     try:
-        env_cfg.validate()
+        validate(env_cfg)
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"Invalid environment configuration: {exc}") from None
 
-    try:
-        with launch_simulation(env_cfg, args_cli):
-            with contextlib.closing(gym.make(args_cli.task, cfg=env_cfg)) as env:
-                print(f"[INFO]: Gym observation space: {env.observation_space}")
-                print(f"[INFO]: Gym action space: {env.action_space}")
-                env.reset()
-                if policy == "zero":
-                    action_policy = create_zero_action_policy(env)
-                else:
-                    action_policy = create_random_action_policy(env)
-                print(f"[INFO] {policy.capitalize()} agent is running, press Ctrl+C to exit...")
+    with launch_simulation(env_cfg, args_cli), contextlib.ExitStack() as cleanup:
+        env = gym.make(args_cli.task, cfg=env_cfg)
+        cleanup.callback(lambda: close_env(env))
+        print(f"[INFO]: Gym observation space: {env.observation_space}")
+        print(f"[INFO]: Gym action space: {env.action_space}")
+        env.reset()
+        if policy == "zero":
+            action_policy = create_zero_action_policy(env)
+        else:
+            action_policy = create_random_action_policy(env)
+        print(f"[INFO] {policy.capitalize()} agent is running, press Ctrl+C to exit...")
 
-                budgets = [n for n in (args_cli.max_steps, video_playback_steps(args_cli, env_cfg)) if n is not None]
-                max_steps = min(budgets, default=None)
+        budgets = [n for n in (args_cli.max_steps, video_playback_steps(args_cli, env_cfg)) if n is not None]
+        max_steps = min(budgets, default=None)
 
-                # keep running while any visualizer is open and the step budget is not exhausted
-                sim = env.unwrapped.sim
-                step = 0
-                while sim.is_headless_or_exist_active_visualizer():
-                    if max_steps is not None and step >= max_steps:
-                        break
-                    step += 1
-                    with torch.inference_mode():
-                        env.step(action_policy())
-    except KeyboardInterrupt:
-        print(f"\n[INFO] {policy.capitalize()} agent stopped.")
+        # keep running while any visualizer is open and the step budget is not exhausted
+        sim = env.unwrapped.sim
+        step = 0
+        while sim.is_running():
+            if max_steps is not None and step >= max_steps:
+                break
+            step += 1
+            with torch.inference_mode():
+                env.step(action_policy())
 
 
 def create_zero_action_policy(env: gym.Env) -> Callable[[], Any]:
@@ -121,7 +122,7 @@ def create_zero_action_policy(env: gym.Env) -> Callable[[], Any]:
     if action_manager is not None:
         return _create_manager_zero_action_policy(action_manager, unwrapped)
 
-    if hasattr(unwrapped, "action_spaces"):
+    if isinstance(unwrapped.cfg, DirectMARLEnvCfg):
         actions = {
             agent: sample_space(space, unwrapped.device, batch_size=unwrapped.num_envs, fill_value=0)
             for agent, space in unwrapped.action_spaces.items()
@@ -132,9 +133,16 @@ def create_zero_action_policy(env: gym.Env) -> Callable[[], Any]:
     return lambda: actions
 
 
-def create_random_action_policy(env: gym.Env) -> Callable[[], torch.Tensor]:
-    """Create a policy that samples uniform random actions in ``[-1, 1]``."""
-    device = env.unwrapped.device
+def create_random_action_policy(env: gym.Env) -> Callable[[], torch.Tensor | dict[str, torch.Tensor]]:
+    """Create a policy that samples uniform random actions in ``[-1, 1]`` for each environment and agent."""
+    unwrapped = env.unwrapped
+    device = unwrapped.device
+    if isinstance(unwrapped.cfg, DirectMARLEnvCfg):
+        return lambda: {
+            agent: 2 * torch.rand((unwrapped.num_envs, *space.shape), device=device) - 1
+            for agent, space in unwrapped.action_spaces.items()
+        }
+
     return lambda: 2 * torch.rand(env.action_space.shape, device=device) - 1
 
 
@@ -193,7 +201,7 @@ def _create_action_term_zero_policy(term: Any, env: Any) -> Callable[[], torch.T
         def differential_ik_policy() -> torch.Tensor:
             ee_pos, ee_quat = term._compute_frame_pose()
             command = ee_pos if term.cfg.controller.command_type == "position" else torch.cat((ee_pos, ee_quat), dim=-1)
-            return _unscale_action(command, term._scale)
+            return _unscale_action(command - term._offset, term._scale)
 
         return differential_ik_policy
 

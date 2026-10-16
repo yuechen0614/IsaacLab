@@ -143,7 +143,7 @@ Tasks can expose alternatives such as ``physics=physx``, ``physics=ovphysx``, or
 ``physics=newton_mjwarp`` without changing their asset import paths.
 
 For a comprehensive overview of the factory pattern and backend selection,
-see :doc:`/source/concepts/backend_architecture`. To add a new backend, see
+see :ref:`backend-architecture`. To add a new backend, see
 :doc:`/source/developer-tools/add_physics_backend`.
 
 
@@ -839,7 +839,7 @@ replacement, prefer the Isaac Lab API** over the ``isaacsim.core.experimental.*`
    * - ``isaacsim.core.utils.stage``
      - :mod:`isaaclab.sim.utils.stage` (e.g. ``get_current_stage``,
        ``create_new_stage``, ``open_stage``, ``save_stage``, ``close_stage``,
-       ``clear_stage``, ``update_stage``, ``use_stage``)
+       ``clear_stage``, ``use_stage``)
    * - ``isaacsim.core.utils.prims``
      - :mod:`isaaclab.sim.utils.prims` (e.g. ``create_prim``, ``delete_prim``,
        ``change_prim_property``, ``bind_visual_material``,
@@ -1050,7 +1050,7 @@ removed in a future release.
 
 Actuator configurations now use joint-qualified names for solver limits. Update active
 configurations to the canonical fields below. The former names remain accepted with a
-``DeprecationWarning`` through the 3.x release line and will be removed in 3.1.
+``DeprecationWarning`` and will be removed in 3.1.
 
 .. list-table:: Actuator limit migration
    :header-rows: 1
@@ -1072,7 +1072,7 @@ configurations to the canonical fields below. The former names remain accepted w
 ``actuator_effort_limit`` clips explicit actuator-model output. ``joint_effort_limit`` and
 ``joint_velocity_limit`` are construction-time joint-property overrides selected by an actuator
 group's joint expression. The deprecated aliases ``effort_limit``, ``velocity_limit``,
-``effort_limit_sim``, and ``velocity_limit_sim`` remain accepted through 3.x. ``effort_limit``
+``effort_limit_sim``, and ``velocity_limit_sim`` remain accepted until 3.1. ``effort_limit``
 resolves to the rated ``actuator_effort_limit`` for every actuator type. For an implicit group
 without a separately configured solver clamp, the rated value also populates
 ``joint_effort_limit`` for backward compatibility; configure both fields to author distinct
@@ -1547,22 +1547,23 @@ If you need to track sensor poses in world frame, please use a dedicated sensor 
 .. rubric:: Contact force property names
 
 Contact sensor force properties now state whether they contain aggregate or filtered normal and
-friction forces. ``net_forces_w`` is the total contact force (normal + friction). Newton reports
-this quantity directly. PhysX and OVPhysX cannot compute a total force, so they return the
-corresponding normal-force quantity and warn. ``friction_forces_w`` is the aggregate friction
-force. Newton reports it as ``net_friction_forces_w``; PhysX and OVPhysX only provide filtered
-friction, so they return ``friction_force_matrix_w`` and warn.
+friction forces. ``net_forces_w`` is the total contact force (normal + friction). Newton, OVPhysX,
+and Isaac Sim PhysX 6.2 or later report this quantity even when ``track_friction_forces=False``.
+Isaac Sim PhysX 6.1 returns the corresponding normal-force quantity and warns.
+``friction_forces_w`` is the aggregate friction force. Newton, OVPhysX, and Isaac Sim PhysX 6.2 or
+later report it as ``net_friction_forces_w``; Isaac Sim PhysX 6.1 only provides filtered friction,
+so it returns ``friction_force_matrix_w`` and warns.
 
 .. list-table::
    :header-rows: 1
 
    * - Property
      - Meaning
-     - PhysX / OVPhysX
-     - Newton
+     - Isaac Sim PhysX 6.1
+     - Newton / OVPhysX / Isaac Sim PhysX 6.2+
    * - ``net_forces_w``
      - Total contact force
-     - Returns ``net_normal_forces_w`` (cannot compute total force)
+     - Returns ``net_normal_forces_w`` with a warning
      - Total force (``normal + friction``)
    * - ``net_forces_w_history``
      - Total contact-force history
@@ -1583,10 +1584,17 @@ friction, so they return ``friction_force_matrix_w`` and warn.
 
 Prefer the explicit names ``net_normal_forces_w``, ``net_friction_forces_w``,
 ``normal_force_matrix_w``, and ``friction_force_matrix_w`` (and their ``*_history`` variants)
-when the normal / friction split matters. Newton also exposes ``net_friction_forces_w_history``
-and ``friction_force_matrix_w_history``. PhysX cannot report an unfiltered aggregate friction
-force and raises ``NotImplementedError`` when ``net_friction_forces_w`` or
-``net_friction_forces_w_history`` is accessed; use the filtered friction matrix instead.
+when the normal / friction split matters. Newton, OVPhysX, and Isaac Sim PhysX 6.2 or later also
+expose ``net_friction_forces_w_history`` and ``friction_force_matrix_w_history``. Isaac Sim PhysX 6.1
+does not expose aggregate friction and raises ``NotImplementedError`` when
+``net_friction_forces_w`` or ``net_friction_forces_w_history`` is accessed; use the filtered
+friction matrix instead.
+
+On OVPhysX and Isaac Sim PhysX 6.2 or later, ``track_friction_forces=True`` enables separate
+friction buffers and histories without requiring contact filters. Force matrices still require
+filters. Aggregate and filtered forces do not depend on ``max_contact_data_count_per_prim``; a
+positive capacity is required only when ``track_contact_points=True``. Total-force buffers always
+include friction, whether or not its separate buffers are enabled.
 
 
 .. rubric:: Articulation Joint Wrench Data Moved to ``JointWrenchSensor``
@@ -1613,9 +1621,10 @@ For configuration and data access examples, see the :ref:`overview_sensors_joint
    import torch
    from isaaclab.scene import InteractiveSceneCfg
    from isaaclab.sensors import JointWrenchSensorCfg
+   from isaaclab.utils import replace
 
    class MySceneCfg(InteractiveSceneCfg):
-       robot = ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+       robot = replace(ROBOT_CFG, prim_path="{ENV_REGEX_NS}/Robot")
        joint_wrench = JointWrenchSensorCfg(prim_path="{ENV_REGEX_NS}/Robot")
 
    sensor = env.scene.sensors["joint_wrench"]
@@ -1643,9 +1652,10 @@ depend on the joint-wrench sensor instead:
    from isaaclab.managers import ObservationTermCfg as ObsTerm
    from isaaclab.scene import InteractiveSceneCfg
    from isaaclab.sensors import JointWrenchSensorCfg
+   from isaaclab.utils import replace
 
    class MySceneCfg(InteractiveSceneCfg):
-       robot = ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+       robot = replace(ROBOT_CFG, prim_path="{ENV_REGEX_NS}/Robot")
        joint_wrench = JointWrenchSensorCfg(prim_path="{ENV_REGEX_NS}/Robot")
 
    feet_body_forces = ObsTerm(
@@ -1695,7 +1705,7 @@ pattern as the general ProxyArray backend migration described above.
 **Ray Alignment Configuration**
 
 The ``attach_yaw_only`` boolean parameter on :class:`~isaaclab.sensors.RayCasterCfg` has been
-deprecated in favor of the new ``ray_alignment`` parameter, which accepts one of three string
+removed in favor of the new ``ray_alignment`` parameter, which accepts one of three string
 values:
 
 .. list-table::
@@ -1803,7 +1813,7 @@ Migrate tensor access, indexed writes, buffers, and quaternion conventions befor
 
          identity = (0.0, 0.0, 0.0, 1.0)
          root_pos = robot.data.root_pos_w.torch
-         robot.write_root_pose_to_sim_index(pose, env_ids)
+         robot.write_root_pose_to_sim_index(root_pose=pose, env_ids=env_ids)
 
 
 .. rubric:: Quaternion Format
@@ -2073,9 +2083,9 @@ by the convention change.
 
 .. rubric:: Quaternion Utility API Changes
 
-**The ``convert_quat`` function has been removed**
+**The convert_quat function is no longer needed**
 
-Previously, IsaacLab had a utility function to convert between quaternion formats:
+IsaacLab provides a utility function to convert between quaternion formats:
 
 .. code-block:: python
 
@@ -2083,8 +2093,9 @@ Previously, IsaacLab had a utility function to convert between quaternion format
    from isaaclab.utils.math import convert_quat
    quat_xyzw = convert_quat(quat_wxyz, "xyzw")
 
-Since everything now uses XYZW natively, this function is no longer needed.
-If you were using it, simply remove the conversion calls.
+Since everything now uses XYZW natively, this function is no longer needed for Isaac Lab data.
+If you were using it, simply remove the conversion calls. Keep it only to convert external
+data that still uses WXYZ order.
 
 
 **Math utility functions now expect XYZW**
@@ -2275,7 +2286,8 @@ All asset write methods have been split into two explicit variants:
   boolean mask selecting which environments to update. The ``data`` tensor has shape
   ``(num_envs, ...)``.
 
-The previous ``write_*_to_sim(data, env_ids)`` methods have been removed.
+The previous ``write_*_to_sim(data, env_ids)`` methods are deprecated and forward to the
+``_index`` variants.
 
 .. code-block:: python
 
@@ -2352,25 +2364,22 @@ The previous ``write_*_to_sim(data, env_ids)`` methods have been removed.
      - ``write_body_link_velocity_to_sim_index`` / ``write_body_link_velocity_to_sim_mask``
 
 
-.. rubric:: TimestampedBufferWarp
+.. rubric:: Timestamped buffers
 
-If you have custom asset or sensor data classes that subclass the Isaac Lab base data classes,
-note that internal buffers have changed from :class:`~isaaclab.utils.buffers.TimestampedBuffer`
-to :class:`~isaaclab.utils.buffers.TimestampedBufferWarp`. The new class takes ``(shape, device,
-wp_dtype)`` as constructor arguments instead of a ``torch.Tensor``:
+Custom asset and sensor data classes use :class:`~isaaclab.utils.buffers.TimestampedBuffer`
+with explicitly allocated Torch or Warp storage. The separate ``TimestampedBufferWarp``
+allocator was removed; replace it with ``TimestampedBuffer(wp.zeros(...))``.
 
 .. code-block:: python
 
    import warp as wp
-   from isaaclab.utils.buffers import TimestampedBufferWarp
+   from isaaclab.utils.buffers import TimestampedBuffer
 
    # Before (Isaac Lab 2.x)
    self._data.root_pos_w = TimestampedBuffer(torch.zeros(num_envs, 3, device=device))
 
    # After (Isaac Lab 3.x)
-   self._data.root_pos_w = TimestampedBufferWarp(
-       shape=(num_envs,), device=device, wp_dtype=wp.vec3f
-   )
+   self._data.root_pos_w = TimestampedBuffer(wp.zeros(num_envs, dtype=wp.vec3f, device=device))
 
 
 Reinforcement Learning
@@ -2643,8 +2652,9 @@ tracking is handled directly by :class:`~isaaclab_visualizers.kit.KitVisualizer`
 The ``tiled_cam_*`` configuration fields on visualizer configs (e.g. ``tiled_cam_view``,
 ``tiled_cam_num``, ``tiled_cam_prim_path``) have been removed and replaced by the unified
 ``streaming_*`` API available on all four visualizer backends.  A one-release deprecation
-shim forwards each removed field to its ``streaming_*`` equivalent and emits
+shim forwards the old fields except renderer selection to their ``streaming_*`` equivalents and emits
 :class:`DeprecationWarning`; the shim will be removed in the next major release.
+Renderer selection now takes a configuration directly, without a nickname compatibility path.
 
 .. list-table:: Field rename reference
    :header-rows: 1
@@ -2666,8 +2676,15 @@ shim forwards each removed field to its ``streaming_*`` equivalent and emits
      - ``streaming_cam_eye``
      -
    * - ``tiled_cam_renderer``
-     - ``streaming_cam_renderer``
-     - Accepts ``"newton_warp"``, ``"ovrtx"``, ``"isaac_rtx"``, or ``None``
+     - ``streaming_cam_renderer_cfg``
+     - Renderer configuration, not a nickname
+
+Replace ``streaming_cam_renderer="ovrtx"`` with ``streaming_cam_renderer_cfg=OVRTXRendererCfg()``
+(imported from ``isaaclab_ov.renderers``). Likewise, pass ``NewtonWarpRendererCfg()`` or
+``IsaacRtxRendererCfg()`` for Newton Warp or Isaac RTX. Custom configurations use their existing
+``class_type`` class or resolvable string. Kit defaults to Isaac RTX; the other visualizers default
+to Newton Warp. An unavailable explicitly selected renderer raises its construction error instead
+of silently selecting another renderer.
 
 .. code-block:: python
 
@@ -2985,8 +3002,6 @@ and ``MJCFImporterConfig`` dataclass.
 The following :class:`~sim.converters.MjcfConverterCfg` settings have been **removed** because
 the new converter handles them automatically based on the MJCF file content:
 
-- ``fix_base`` — base fixedness is now inferred from the MJCF ``<freejoint>`` tag.
-- ``link_density`` — density is now read directly from the MJCF model.
 - ``import_inertia_tensor`` — inertia tensors are always imported.
 - ``import_sites`` — sites are always imported.
 
@@ -3005,8 +3020,8 @@ The following new settings were added to :class:`~sim.converters.MjcfConverterCf
 +-----------------------------------------------------------------+------------------------------------------------------+
 | :attr:`~sim.converters.MjcfConverterCfg.collision_from_visuals` | Generate collision geometry from visuals.            |
 +-----------------------------------------------------------------+------------------------------------------------------+
-| :attr:`~sim.converters.MjcfConverterCfg.collision_type`         | Type of collision geometry (e.g. ``"default"``,      |
-|                                                                 | ``"Convex Hull"``, ``"Convex Decomposition"``).      |
+| :attr:`~sim.converters.MjcfConverterCfg.collision_type`         | Type of collision geometry (e.g. ``"Convex Hull"``,  |
+|                                                                 | ``"Convex Decomposition"``, ``"Bounding Cube"``).    |
 +-----------------------------------------------------------------+------------------------------------------------------+
 
 
@@ -3295,23 +3310,24 @@ For a complete guide to multi-backend support, see the "Multi-Backend Support: P
 Pattern" section above.
 
 
-.. rubric:: XR Teleoperation: Isaac Teleop Integration
+.. rubric:: XR Teleoperation: Isaac Capture Integration
 
 The native XR teleoperation stack in ``isaaclab.devices.openxr`` has been deprecated and replaced
-by `Isaac Teleop <https://github.com/NVIDIA/IsaacTeleop>`_, integrated via the ``isaaclab_teleop``
+by `Isaac Capture <https://github.com/NVIDIA/IsaacCapture>`_, integrated via the ``isaaclab_teleop``
 extension. The ``isaac-teleop-device-plugins`` repository has also been deprecated; all device
-plugin support is now in Isaac Teleop.
+plugin support is now in Isaac Capture.
 
 For full documentation on the new stack, see :ref:`isaac-teleop-feature`.
 
 
 **Installation Requirement**
 
-Isaac Teleop must now be installed in your Isaac Lab environment:
+Isaac Capture must now be installed in your Isaac Lab environment. It ships with the ``teleop``
+extra:
 
 .. code-block:: bash
 
-   pip install isaacteleop~=1.0 --extra-index-url https://pypi.nvidia.com
+   uv sync --extra teleop --extra isaacsim
 
 See :ref:`install-isaac-teleop` for complete installation instructions.
 
@@ -3333,7 +3349,7 @@ See :ref:`install-isaac-teleop` for complete installation instructions.
    * - ``from isaaclab.devices.openxr import ManusVive``
      - ``from isaaclab_teleop import IsaacTeleopDevice`` (with Manus plugin configured)
    * - ``from isaaclab.devices import RetargeterBase``
-     - Use Isaac Teleop ``BaseRetargeter`` and pipeline builder pattern
+     - Use Isaac Capture ``BaseRetargeter`` and pipeline builder pattern
    * - ``from isaaclab.devices.openxr.retargeters import Se3AbsRetargeter``
      - ``from isaacteleop.retargeters import Se3AbsRetargeter``
 

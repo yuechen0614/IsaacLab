@@ -13,6 +13,8 @@ import os
 import time
 from datetime import datetime
 
+import torch.distributed as dist
+
 from isaaclab.app import add_launcher_args, launch_simulation, report_activity
 from isaaclab.envs import DirectMARLEnvCfg
 from isaaclab.utils.assets import retrieve_file_path
@@ -35,6 +37,7 @@ from ..common import (
     add_common_train_args,
     apply_env_overrides,
     apply_video_recording,
+    close_env,
     create_isaaclab_env,
     dump_train_configs,
     enable_cameras_for_video,
@@ -65,6 +68,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--external_callback", default=None, help="Fully qualified path to an externally defined callback."
+    )
+    parser.add_argument(
+        "--resume_optimizer_state",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Restore the policy optimizer; disable to keep a fresh optimizer and configured learning rate.",
     )
     cli_args.add_rsl_rl_args(parser)
     add_launcher_args(parser)
@@ -106,7 +115,7 @@ def run(argv: list[str]) -> None:
         cuda_matmul_allow_tf32=True,
         cudnn_allow_tf32=True,
         cudnn_deterministic=False,
-        cudnn_benchmark=False,
+        cudnn_benchmark=True,  # Reuse autotuned convolution algorithms for fixed input shapes.
     ):
         _run(args_cli)
 
@@ -120,30 +129,35 @@ def _run(args_cli: argparse.Namespace) -> None:
         pre_launch_video_config(env_cfg, args_cli)
         show_run_summary(screen, args_cli, env_cfg, library="rsl_rl", action="train")
         screen.stage("Launching simulation")
-        with launch_simulation(env_cfg, args_cli):
+        with launch_simulation(env_cfg, args_cli), contextlib.ExitStack() as cleanup:
             agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
             agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
             apply_env_overrides(args_cli, env_cfg)
             validate_distributed_device(args_cli)
             if args_cli.max_iterations is not None:
                 agent_cfg.max_iterations = args_cli.max_iterations
-            if args_cli.distributed:
+            rank = int(os.getenv("RANK", "0")) if args_cli.distributed else None
+            if rank is not None:
                 agent_cfg.device = env_cfg.sim.device
-                agent_cfg.seed += int(os.getenv("RANK", "0"))
+                agent_cfg.seed += rank
             env_cfg.seed = agent_cfg.seed
 
             log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
             print(f"[INFO] Logging experiment in directory: {log_root_path}")
-            run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            run_name = args_cli.run_timestamp or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             print(f"Exact experiment name requested from command line: {run_name}")
             if agent_cfg.run_name:
                 run_name += f"_{agent_cfg.run_name}"
             log_dir = os.path.join(log_root_path, run_name)
-            write_run_manifest(log_dir, library="rsl_rl", task=args_cli.task, metadata={"agent": args_cli.agent})
+            # rank 0 writes its settings and videos where a single-GPU run does; other ranks use rank_<rank>/
+            rank_dir = log_dir if rank in (None, 0) else os.path.join(log_dir, f"rank_{rank}")
+            # All ranks share the run folder, so its manifest is written once.
+            if rank in (None, 0):
+                write_run_manifest(log_dir, library="rsl_rl", task=args_cli.task, metadata={"agent": args_cli.agent})
 
             resume_path = _resolve_checkpoint(args_cli, agent_cfg, log_root_path)
-            env_cfg.log_dir = log_dir
-            apply_video_recording(env_cfg, log_dir, args_cli)
+            env_cfg.log_dir = rank_dir
+            apply_video_recording(env_cfg, rank_dir, args_cli)
 
             screen.stage("Creating environment")
             env = create_isaaclab_env(
@@ -152,7 +166,8 @@ def _run(args_cli: argparse.Namespace) -> None:
                 args_cli,
                 convert_marl_to_single_agent=isinstance(env_cfg, DirectMARLEnvCfg),
             )
-            env = wrap_sensor_capture(env, log_dir, args_cli)
+            cleanup.callback(lambda: close_env(env))
+            env = wrap_sensor_capture(env, rank_dir, args_cli)
 
             screen.stage("Preparing agent")
             start_time = time.time()
@@ -170,8 +185,15 @@ def _run(args_cli: argparse.Namespace) -> None:
             runner.add_git_repo_to_log(__file__)
             if resume_path is not None:
                 print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-                runner.load(resume_path)
-            dump_train_configs(log_dir, env_cfg, agent_cfg)
+                # map to this process's device; the checkpoint's tensors otherwise land on the GPU that saved them
+                runner.load(
+                    resume_path,
+                    load_cfg=cli_args.checkpoint_load_cfg(
+                        args_cli.resume_optimizer_state, runner_class=agent_cfg.class_name
+                    ),
+                    map_location=agent_cfg.device,
+                )
+            dump_train_configs(rank_dir, env_cfg, agent_cfg)
 
             if agent_cfg.logger == "wandb":
                 announce_new_run(agent_cfg.wandb_project, resolve_wandb_entity())
@@ -183,4 +205,6 @@ def _run(args_cli: argparse.Namespace) -> None:
                     init_at_random_ep_len=agent_cfg.init_at_random_ep_len,
                 )
                 print(f"Training time: {round(time.time() - start_time, 2)} seconds")
-            env.close()
+                # the RL library creates the process group but never destroys it, which torch warns about at exit
+                if dist.is_initialized():
+                    dist.destroy_process_group()

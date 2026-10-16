@@ -39,7 +39,7 @@ The tutorial corresponds to the ``add_sensors_on_robot.py`` script in the
 
    .. literalinclude:: ../../../scripts/tutorials/04_sensors/add_sensors_on_robot.py
       :language: python
-      :emphasize-lines: 72-95, 143-153, 167-168
+      :emphasize-lines: 74-96, 147-160, 177-178
       :linenos:
 
 
@@ -90,6 +90,16 @@ and ``"front_cam"`` is the name of the prim associated with the camera sensor.
    :start-at: camera = CameraCfg(
    :end-before: height_scanner = RayCasterCfg(
 
+Camera sensors need the simulator's rendering extensions, also when running without a visualizer.
+:func:`~app.launch_simulation` enables them automatically when the configuration it is given contains a
+camera. Since this script passes only the simulation configuration and the camera lives in the scene
+configuration, the script requests camera rendering explicitly after parsing its arguments:
+
+.. literalinclude:: ../../../scripts/tutorials/04_sensors/add_sensors_on_robot.py
+   :language: python
+   :start-at: args_cli = parser.parse_args()
+   :end-at: args_cli.enable_cameras = True
+
 Height scanner
 --------------
 
@@ -98,7 +108,8 @@ The height-scanner is implemented as a virtual ray-casting sensor. Through the
 cast against the configured meshes, while Newton casts against its live scene
 BVH and ignores the mesh list. By default, :attr:`~sensors.RayCasterCfg.spawn` creates
 a plain USD Xform at :attr:`~sensors.RayCasterCfg.prim_path` to serve as the sensor's
-attachment frame, similar to how :class:`sensors.CameraCfg` spawns a Camera prim.
+attachment frame. This compatibility behavior is deprecated; new configurations should
+set :attr:`~sensors.RayCasterCfg.spawn` to ``None`` and track an existing frame.
 
 For this tutorial, the ray-cast based height scanner is attached under the base frame of the robot.
 The pattern of rays is specified using the :attr:`~sensors.RayCasterCfg.pattern` attribute. For

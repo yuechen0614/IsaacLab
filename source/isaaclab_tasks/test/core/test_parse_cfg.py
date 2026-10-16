@@ -6,6 +6,10 @@
 """Tests for :func:`isaaclab_tasks.utils.parse_cfg.parse_env_cfg`."""
 
 import pytest
+from isaaclab_physx.physics import PhysxCfg
+
+from isaaclab.utils import validate
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
@@ -20,7 +24,7 @@ def test_parse_env_cfg_rejects_bare_string_overrides():
 def test_parse_env_cfg_accepts_list_overrides():
     """A properly wrapped override list should apply without error."""
     env_cfg = parse_env_cfg("Isaac-Cartpole", overrides=["physics=isaacsim_physx"])
-    assert env_cfg is not None
+    assert isinstance(env_cfg.sim.physics, PhysxCfg)
 
 
 def test_parse_env_cfg_preserves_task_device_when_omitted():
@@ -28,7 +32,7 @@ def test_parse_env_cfg_preserves_task_device_when_omitted():
     env_cfg = parse_env_cfg("IsaacContrib-Stack-Cube-Galbot-Right-Arm-Suction-RmpFlow")
 
     assert env_cfg.sim.device == "cpu"
-    env_cfg.validate()
+    validate(env_cfg)
 
 
 def test_parse_env_cfg_applies_explicit_device_override():
@@ -38,7 +42,16 @@ def test_parse_env_cfg_applies_explicit_device_override():
     assert env_cfg.sim.device == "cpu"
 
 
-@pytest.mark.parametrize("missing_module", ["pinocchio", "pink", "qpsolvers", "daqp", "unrelated_dependency"])
+def test_anymal_c_rough_uses_relocated_shingles_material():
+    """The Anymal-C rough terrain should use the Isaac Sim 6.2 material location."""
+    env_cfg = parse_env_cfg("IsaacContrib-Velocity-Rough-AnymalC-Direct")
+
+    assert env_cfg.scene.terrain.visual_material.mdl_path == (
+        f"{ISAAC_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl"
+    )
+
+
+@pytest.mark.parametrize("missing_module", ["pinocchio", "daqp", "unrelated_dependency"])
 def test_task_config_missing_pink_dependency(monkeypatch: pytest.MonkeyPatch, missing_module: str):
     """Missing Pink dependencies should identify the task without hiding unrelated import errors."""
     from isaaclab_tasks.utils import parse_cfg

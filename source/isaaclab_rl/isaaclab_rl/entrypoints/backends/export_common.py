@@ -20,7 +20,8 @@ import torch
 # or environment modules that compile decorated helpers at import time.
 torch.jit._state.disable()
 
-from isaaclab.app import AppLauncher, launch_simulation
+
+from isaaclab.app import add_launcher_args, launch_simulation
 
 from isaaclab_tasks.utils import get_checkpoint_path, resolve_task_config, setup_preset_cli
 
@@ -92,8 +93,7 @@ def add_common_export_args(parser: argparse.ArgumentParser, *, agent_default: st
         default=False,
         help="Disable LEAPP graph visualization during compile_graph().",
     )
-    AppLauncher.add_app_launcher_args(parser)
-    parser.add_argument("--limit_cpu_threads", type=int, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    add_launcher_args(parser)
 
 
 def finalize_export_args(
@@ -128,7 +128,7 @@ def run_export(
     original_argv = sys.argv
     sys.argv = [sys.argv[0]] + hydra_args
     try:
-        env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent)
+        env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent, play_mode=True)
         with launch_simulation(env_cfg, args_cli):
             exported = export_agent(args_cli, env_cfg, agent_cfg)
     finally:

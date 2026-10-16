@@ -14,6 +14,7 @@ import logging
 import os
 import random
 import re
+import signal
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -184,6 +185,12 @@ def add_common_train_args(
         parser.add_argument(
             "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
         )
+        parser.add_argument(
+            "--run_timestamp",
+            type=str,
+            default=None,
+            help="Timestamp naming the run folder; train_multigpu passes one so that every rank shares the folder.",
+        )
     parser.add_argument(
         "--max_iterations", type=max_iterations_type, default=None, help="RL Policy training iterations."
     )
@@ -319,7 +326,7 @@ def apply_env_overrides(args_cli: argparse.Namespace, env_cfg: Any, *, apply_dev
             env_cfg.export_io_descriptors = True
         else:
             logger.warning("IO descriptors are only supported for manager-based RL environments; none are exported.")
-    # --deterministic is an AppLauncher flag, so it only reaches carb settings on its own. Record the
+    # --deterministic is a Kit launcher flag, so it only reaches carb settings on its own. Record the
     # request on the resolved physics config; each backend translates and validates it at startup.
     request_determinism(args_cli, env_cfg)
 
@@ -493,7 +500,7 @@ def _renderer_name(env_cfg: Any) -> str | None:
     Only configs whose class declares ``renderer_cfg`` are read. Probing every attribute with
     :func:`getattr` instead would resolve lazily evaluated config values, notably the
     ``ResolvableString`` class handles, which imports Kit modules before
-    :class:`~isaaclab.app.AppLauncher` starts and breaks the Isaac Sim runtime.
+    :class:`~isaaclab_physx.app.KitLauncher` starts and breaks the Isaac Sim runtime.
     """
     for container in (env_cfg, getattr(env_cfg, "scene", None)):
         for value in vars(container).values() if container is not None else ():
@@ -554,6 +561,19 @@ def create_isaaclab_env(
 
         env = multi_agent_to_single_agent(env)
     return env
+
+
+def close_env(env: gym.Env) -> None:
+    """Close the outermost environment wrapper; another SIGINT forces exit.
+
+    Args:
+        env: Environment to close on the entrypoint's main thread.
+    """
+    previous_handler = signal.signal(signal.SIGINT, signal.SIG_DFL)
+    try:
+        env.close()
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
 
 
 """
@@ -1003,9 +1023,8 @@ def _resolve_video_source(env_cfg: Any, args_cli: argparse.Namespace) -> str:
     Raises:
         ValueError: If ``--viz none`` or only streaming visualizers were requested.
     """
-    # _parse_visualizer_csv("none") yields None rather than ["none"], so an explicitly disabled
-    # visualizer is only recognizable through the ExplicitAction sentinel
-    if getattr(args_cli, "visualizer_explicit", False) and getattr(args_cli, "visualizer", "not_none") is None:
+    # ``--viz none`` parses to an empty list
+    if getattr(args_cli, "visualizer", None) == []:
         raise ValueError(
             "--video is not compatible with --viz none: there is no active visualizer to record from. "
             "Remove --viz none so that video recording can auto-create a visualizer, "

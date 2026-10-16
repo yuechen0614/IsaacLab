@@ -1,6 +1,134 @@
 Changelog
 ---------
 
+.. towncrier release notes start
+
+2.1.0 (2026-10-14)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added a reusable Newton particle-surface renderer for GL and RTX viewers,
+  shared by the teapot demo and MPM surface-reconstruction tutorial.
+
+Fixed
+^^^^^
+
+* Fixed dynamic MPM surface mesh submission in Newton RTX and shared staged
+  mesh updates between the Newton GL and RTX frame lifecycles.
+
+
+2.0.3 (2026-10-13)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed Ctrl+C sometimes being swallowed by Kit while updating the visualizer.
+* Fixed Kit toolbar controls so they reflected the running state, paused and resumed training while keeping the app
+  responsive, and did not start PhysX when another physics backend owned the simulation.
+* Fixed Newton GL camera keyboard controls when ImGui captured only mouse input and kept the viewer compatible with
+  Newton's updated fullscreen image handling.
+* Prevented unchanged Rerun instance appearance from being retransmitted every frame during training.
+* Fixed the Newton visualizer's Sky checkbox having no visible effect with the default configuration.
+
+
+2.0.2 (2026-10-10)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed Newton RTX (OVRTX) recordings stopping when a multi-prototype marker switches prototype mid-run.
+
+
+2.0.1 (2026-10-06)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed the Newton GL and Newton RTX visualizers failing to open a window on an X server that reports no monitors, such as a GPU-backed virtual display, with ``AttributeError: 'XlibScreen' object has no attribute 'is_primary'``.
+* Fixed the Newton RTX visualizer freezing on Newton 1.6.1 with OVStage 0.2, where body motion was not
+  reflected in rendered frames. The viewer now holds an OVStage stage using Isaac Lab's hierarchy computation
+  model so the stage Newton creates inherits it.
+* Fixed the first asynchronous Newton RTX frame capture failing to find the color output before viewer warm-up.
+* Resolved Newton RTX color-output aliases from the returned render-variable keys without depending on package version metadata.
+* Fixed the Newton RTX visualizer dropping visualization markers, so both the interactive
+  ``--viz newton_rtx`` viewer and videos captured through it now draw the goal poses, command
+  arrows, and other debug markers the GL viewer already showed, sanitizing the marker group
+  ids into valid USD prim paths the RTX stage accepts.
+* Fixed the Newton RTX visualizer showing a black window and failing headless frame capture with
+  ``ovrtx`` 0.5, which keys render outputs by prim path (``/Render/Vars/LdrColor``) while Newton's
+  ``ViewerRTX`` looks up ``LdrColor``. The viewer now aliases the color output as ``LdrColor`` when ``ovrtx`` is 0.5 or newer.
+
+
+2.0.0 (2026-09-28)
+~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Acquired Newton viewer models from the simulation's shared backend registry instead of the
+  physics manager. Viewers requested transforms and geometry directly through SDP; headless GL
+  and RTX captures requested current arrays only when a frame was requested.
+* Rebound GL, RTX, Rerun, and Viser resources after hard resets, including when picking was disabled.
+* Shared the selected Newton representation with streaming-camera renderers; initialization acquired
+  the clone-built model through ``get_or_create_backend(cfg)`` without cfg notifications.
+* **Breaking:** Replaced streaming renderer nicknames with ``streaming_cam_renderer_cfg``.
+  Kit defaulted to ``IsaacRtxRendererCfg()``; Newton, Rerun, and Viser defaulted to
+  ``NewtonWarpRendererCfg()``. Explicit renderer failures propagated instead of switching renderer
+  or disabling the stream. Visualizers registered their configured auto-camera renderer before cloning.
+  Pass a renderer configuration to customize construction.
+* Honored explicit auto-camera targets in Rerun and Viser instead of substituting a scene camera.
+  Omitting the target continued to adopt an existing camera, as documented.
+* Consolidated GL/RTX headless and paused frame handling without changing pause behavior or
+  frame readback types.
+
+Fixed
+^^^^^
+
+* Validated changed Kit marker environment IDs during their existing device-to-host transfer,
+  including IDs changed in-place after an earlier visualization call.
+
+
+1.11.1 (2026-09-26)
+~~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Routed Kit deformable, particle, and cable updates through the shared Fabric resource and SDP
+  geometry publications, removing dependence on physics-manager render callbacks.
+* Fixed the Kit, ``newton_gl``, and ``newton_rtx`` visualizer windows showing a generic icon in
+  Linux docks. Opening a visualizer window now writes a hidden desktop entry to
+  ``$XDG_DATA_HOME/applications`` (default ``~/.local/share/applications``) that matches the
+  window to its icon.
+* Fixed the ``newton_rtx`` visualizer window not setting Newton's icon.
+
+
+1.11.0 (2026-09-25)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added a clickable demo and example selector to Newton GL for packaged Isaac Lab programs.
+* Added :meth:`~isaaclab_visualizers.newton.NewtonGLVisualizer.is_key_down` so scripts can read
+  keyboard input from the Newton viewer window.
+* Added :meth:`~isaaclab_visualizers.newton.NewtonGLVisualizer.register_ui_callback` and
+  :meth:`~isaaclab_visualizers.newton.NewtonGLVisualizer.request_close` so callers can add viewer panels and close
+  the window safely from inside them.
+
+Changed
+^^^^^^^
+
+* Routed Kit viewport transform updates through SDP, sharing a registry-owned Fabric binding with camera
+  renderers and preserving native PhysX Fabric updates. No visualizer configuration changes were required.
+  Headless viewport transforms and asset tracking refreshed only when a frame was requested.
+
+
 1.10.0 (2026-09-22)
 ~~~~~~~~~~~~~~~~~~~
 

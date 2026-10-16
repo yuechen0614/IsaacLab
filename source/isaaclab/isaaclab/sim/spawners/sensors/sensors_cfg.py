@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import MISSING
 from typing import Literal
 
 import isaaclab.utils.sensors as sensor_utils
-from isaaclab.sim.spawners.spawner_cfg import SpawnerCfg
 from isaaclab.utils import configclass
+
+from ..spawner_cfg import SpawnerCfg
 
 
 @configclass
@@ -130,6 +132,9 @@ class OpenCvFisheyeDistortionCfg(OpenCvDistortionCfg):
 
     k4: float = 0.0
     """Fourth fisheye distortion coefficient. Defaults to 0.0."""
+
+    max_fov: float = math.pi
+    """Full angular domain for Newton's inverse fisheye model [rad]. Defaults to pi (180 degrees)."""
 
 
 @configclass
@@ -362,7 +367,11 @@ class FisheyeCameraCfg(PinholeCameraCfg):
 
 @configclass
 class SensorFrameCfg(SpawnerCfg):
-    """Spawns a plain USD Xform as a sensor attachment frame.
+    """Spawn a plain USD Xform as a sensor attachment frame.
+
+    .. deprecated:: 3.0
+        Author and track an existing Xform instead. This configuration remains available during
+        the deprecation cycle.
 
     The spawned prim carries no rigid body or collision API. It serves as a
     non-physics child under a link so that :class:`~isaaclab.sim.views.FrameView`

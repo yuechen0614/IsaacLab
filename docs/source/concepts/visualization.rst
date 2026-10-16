@@ -8,6 +8,10 @@ renderers produce sensor data for training, visualizers give fast, lightweight f
 human monitoring and recording. Visualizers can also stream that same sensor data through the
 streaming camera panel.
 
+Try :ref:`Franka cube stacking <interactive-demo-franka-stack>` for a compact simulation
+running directly in the browser. Orbit its camera, watch the scripted grasp, or control
+the end effector in Manual mode.
+
 This page covers:
 
 - `Quick Start`_: launch a visualizer with ``--viz``
@@ -152,6 +156,11 @@ alias.
    add ``--extra isaacsim`` to the ``uv run`` commands above; see
    :ref:`installation-optional-extras` for details.
 
+.. note::
+
+   ``train`` and ``play`` run without a visualizer unless ``--viz`` is passed, while packaged demos and
+   examples open their own default visualizer. ``--viz none`` turns it off.
+
 For combining visualizers, running headless, and other common use cases, see `Usage`_ below.
 
 
@@ -208,10 +217,13 @@ Visualizer Overview
              <video autoplay loop muted playsinline controls preload="auto" style="width:100%;">
                <source src="https://download.isaacsim.omniverse.nvidia.com/isaaclab/images/showcase_newton_gl_dominoes.mp4" type="video/mp4">
              </video>
-             <p class="viz-cap">newton_viewer_dominoes demo<br>Right-click dragging the first domino
+             <p class="viz-cap">newton-dominoes example<br>Right-click dragging the first domino
              triggers the cascade across an NVIDIA-logo domino layout</p>
            </div>
          </div>
+
+      Try :ref:`Domino cascade <interactive-demo-dominoes>` for a compact 24-slab version running
+      locally in the browser, with friction and a repeatable toppling pulse.
 
       **Core configuration:**
 
@@ -511,11 +523,15 @@ Visualizer Overview
 Shared Features
 ---------------
 
+.. _visualization-streaming-camera-view:
+
 Streaming Camera View
 ~~~~~~~~~~~~~~~~~~~~~
 
-The streaming camera view composites per-environment sensor data into a tiled panel that
-updates every step.
+The streaming camera view is a live monitoring and debugging tool. It combines ground-truth camera
+frames from multiple environments (RGB, depth, segmentation, or surface normals) into a single
+panel. Frames can come from scene camera sensors or follow cameras created by a visualizer.
+Multiple visualizers can display the same source with different tile selections.
 
 .. raw:: html
 
@@ -534,15 +550,15 @@ updates every step.
      </div>
    </div>
 
-The streaming panel supports RGB, depth, segmentation, and surface normals, with a configurable
-number of environments shown.
+Create a follow camera for a moving robot, or select an existing view such as the Galbot task's
+wrist-mounted and ego cameras. The view is supported in the Kit, Newton GL, Rerun, and Viser
+visualizers; Newton RTX does not display the panel (experimental). **Kit** opens it as a separate
+**Streaming View** viewport, which can sit side by side with the default viewport for dual monitoring,
+and **Newton GL** adds a **Streaming View** HUD section with a **Hide** / **Open** toggle and a source
+dropdown.
 
-Streams can come from auto-created cameras that track and follow robot bodies, or from existing
-scene camera sensors, letting you toggle between different views, such as the Galbot task's
-wrist-mounted and ego cameras. Supported on Kit, Newton GL, Rerun, and Viser; not yet
-supported on Newton RTX (experimental).
-
-See :doc:`/source/features/visualizer_tiled_camera` for the full guide and tutorial.
+See :doc:`/source/how-to/visualizer_streaming_camera_view` for the ``VisualizerCfg`` options, display
+sources, troubleshooting, and step-by-step examples.
 
 
 Visualization Markers
@@ -564,7 +580,7 @@ Visualization markers draw debug geometry over the scene via
      </div>
    </div>
 
-See :doc:`/source/features/draw_markers` for creating and configuring custom markers.
+See :doc:`/source/how-to/create_visualization_markers` for creating and configuring custom markers.
 
 There are 2 types of visualization markers:
 
@@ -646,15 +662,32 @@ streaming views, and renderer-based sensor data capture.
      </div>
    </div>
 
-Pass ``--video`` on the command line for a quick recording from the default visualizer, or
-define multiple ``VideoRecorderCfg`` entries to record multiple sources at once. Kit, Newton
-GL, and Newton RTX visualizers can be recorded while in headless mode, to reduce overhead or
-in case no display is available.
+.. _record_video_cli:
 
-Not currently supported by the web-based visualizers Viser and Rerun; add a headless
-visualizer as a capture source alongside them to record video.
+Pass ``--video`` on the command line for a quick recording, or define multiple
+``VideoRecorderCfg`` entries to record multiple sources at once. When no recorder is configured,
+``--viz`` selects the visualizer that ``--video`` records:
 
-See :doc:`/source/features/record_video` for the full guide and tutorial.
+.. list-table::
+   :widths: 40 60
+   :header-rows: 1
+
+   * - Command line
+     - Records from
+   * - ``--video``
+     - the first configured visualizer, preferring one that supports capture; if none is configured, a
+       headless Kit visualizer
+   * - ``--video --viz newton_rtx``
+     - the selected ``newton_rtx`` window
+   * - ``--video --viz newton_gl,viser``
+     - both visualizers run and the capture-capable ``newton_gl`` window is recorded
+   * - ``--video --viz viser``
+     - error because Viser has no local frame-capture API
+
+Kit, Newton GL, and Newton RTX visualizers can be recorded from; the web-based visualizers Viser and
+Rerun cannot. Use ``VideoRecorderCfg(source="sensor:<name>")`` to record a scene sensor instead.
+
+See :doc:`/source/how-to/record_video` for the full guide and tutorial.
 
 
 .. _visualization-configuration:
@@ -686,24 +719,15 @@ capture source:
           ./isaaclab.sh train --rl_library rsl_rl --task Isaac-Cartpole \
               --viz newton_gl --headless --video
 
-See :doc:`/source/features/record_video` for clip length, interval, and multi-source options.
+See :doc:`/source/how-to/record_video` for clip length, interval, and multi-source options.
+
+.. _visualization-recording-angle:
 
 **Combining an interactive view with a headless recording source**
 
-Watch training live in Kit while recording from a separate headless Newton GL angle:
-
-.. code-block:: python
-
-    from isaaclab_visualizers.kit import KitVisualizerCfg
-    from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
-
-    sim_cfg.visualizer_cfgs = [
-        KitVisualizerCfg(eye=(4.0, 4.0, 2.0)),
-        NewtonGLVisualizerCfg(eye=(12.0, 0.0, 6.0), headless=True),
-    ]
-
-See the "Recording from an independent camera angle" section of
-:doc:`/source/features/record_video` for the full example.
+Watch training live in Kit while recording from a separate headless Newton GL angle by configuring
+both visualizers and selecting Newton GL in ``VideoRecorderCfg``. See
+:ref:`Recording from an independent camera angle <how_to_record_video_angle>` for the configuration.
 
 **Following a moving robot (Kit)**
 
@@ -794,13 +818,37 @@ To configure visualizer settings in code, pass ``VisualizerCfg`` instances to
 For migration context, see :doc:`/source/migration/migrating_to_isaaclab_3-0`.
 
 
+.. _visualization-partial-visualization:
+
+Partial Visualization
+~~~~~~~~~~~~~~~~~~~~~
+
+Visualizers can be configured to visualize just a subset of environments.
+This is called partial visualization.
+
+There are 3 fields exposed in the ``VisualizerCfg`` for selecting environments for partial visualization:
+
+- ``max_visible_envs`` caps how many envs are shown.
+- ``visible_env_indices`` explicitly selects the envs to visualize, in the order given. It takes precedence over
+  ``randomly_sample_visible_envs`` and is also capped by ``max_visible_envs``.
+- ``randomly_sample_visible_envs`` (default ``True``): when ``visible_env_indices`` is unset and ``max_visible_envs``
+  is set, enables randomly sampling the selected envs. If disabled, the first ``max_visible_envs`` envs are selected.
+
+Also, there is a CLI arg ``--max_visible_envs`` that overrides ``VisualizerCfg.max_visible_envs`` for the run.
+
+.. note::
+
+   By default, selected envs keep their simulated positions, so a random sample or the first envs of a large grid can lie
+   outside the camera view. Choose indices near the camera target, or move ``eye`` and ``lookat``.
+
 Scene Background
 ~~~~~~~~~~~~~~~~
 
-Kit, Newton GL, and Newton RTX use the shared solid sky-blue background from
-``VisualizerCfg.background_color`` by default. This changes only the visible background; scene
-lights continue to illuminate objects and contribute reflections. Set a different normalized RGB
-color directly, or set the field to ``None`` to preserve the backend's native background:
+Kit uses the solid sky-blue background from ``VisualizerCfg.background_color`` by default. The
+Newton visualizers override that default with ``None`` so Newton GL preserves its procedural sky
+and Newton RTX preserves its native background. For any visualizer, set ``background_color`` to
+``None`` to preserve the backend's native background, or set an explicit normalized RGB color to
+override the visible background. Scene lights continue to illuminate objects and contribute reflections:
 
 .. code-block:: python
 
@@ -822,14 +870,14 @@ Performance
      - Lowest overhead; increase ``update_frequency`` to skip render calls.
    * - Viser
      - Newton Warp renderer; use ``max_visible_envs`` to limit the number of rendered
-       environments.
+       environments (see :ref:`visualization-partial-visualization`).
    * - Newton RTX
      - Path-traced; highest per-frame cost, use ``--max_visible_envs`` to reduce load.
    * - Rerun
      - Web viewer may slow down with many environments; use ``--num_envs`` to reduce load.
    * - Kit
      - Highest overhead of the five visualizers; reduce ``window_width`` / ``window_height``
-       or use ``--max_visible_envs``.
+       or use ``--max_visible_envs`` (see :ref:`visualization-partial-visualization`).
 
 
 Limitations
@@ -978,11 +1026,11 @@ Remove the conflicting conda packages to use the system libraries instead:
 See Also
 --------
 
-- :doc:`/source/features/visualizer_tiled_camera`: full streaming camera panel guide and tutorial
-- :doc:`/source/features/record_video`: recording MP4 clips from a visualizer or sensor
-- :doc:`/source/features/draw_markers`: creating and configuring custom visualization markers
+- :doc:`/source/how-to/visualizer_streaming_camera_view`: stream a camera view step by step
+- :doc:`/source/how-to/record_video`: recording MP4 clips from a visualizer or sensor
+- :doc:`/source/how-to/create_visualization_markers`: creating and configuring custom visualization markers
 - :doc:`/source/how-to/capture_sensor_frames`: saving per-frame sensor outputs during training
 - :doc:`/source/concepts/renderers`: renderer backends (RTX, Newton Warp, OVRTX)
-- :doc:`/source/developer-tools/scene_data_providers`: how scene data flows to visualizers
+- :doc:`/source/concepts/native-physics-api/scene_data_providers`: how scene data flows to visualizers
 - :ref:`physics-backends-newton`: Newton backend guide
 - :doc:`/source/migration/migrating_to_isaaclab_3-0`: visualizer migration reference

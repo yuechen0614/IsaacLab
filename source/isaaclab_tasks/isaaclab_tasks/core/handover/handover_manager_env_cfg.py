@@ -16,8 +16,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
-from isaaclab.utils import configclass
-from isaaclab.visualizers import VisualizerCfg
+from isaaclab.utils import clone, configclass, replace
 
 import isaaclab_tasks.core.reorient.mdp as reorient_mdp
 from isaaclab_tasks.utils import PresetCfg
@@ -25,6 +24,7 @@ from isaaclab_tasks.utils import PresetCfg
 from isaaclab_assets.robots.shadow_hand import FINGERTIP_NAMES, JOINT_NAMES, TENDON_NAMES, TENDON_POSITION_LIMITS
 
 from . import mdp
+from .handover_common import VISUALIZER_CFG
 from .handover_env_cfg import BALL_CFG, LeftHandCfg, PhysicsCfg, RightHandCfg
 
 ##
@@ -89,11 +89,11 @@ class ActionsCfg:
     right_hand = mdp.EMAJointPositionToLimitsActionCfg(
         asset_name="right_hand", joint_names=JOINT_NAMES, alpha=1.0, rescale_to_limits=True
     )
-    right_hand_tendons = TENDON_ACTION_CFG.replace(asset_name="right_hand")
+    right_hand_tendons = replace(TENDON_ACTION_CFG, asset_name="right_hand")
     left_hand = mdp.EMAJointPositionToLimitsActionCfg(
         asset_name="left_hand", joint_names=JOINT_NAMES, alpha=1.0, rescale_to_limits=True
     )
-    left_hand_tendons = TENDON_ACTION_CFG.replace(asset_name="left_hand")
+    left_hand_tendons = replace(TENDON_ACTION_CFG, asset_name="left_hand")
 
 
 @configclass
@@ -322,7 +322,4 @@ class HandoverManagerEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics_material = RigidBodyMaterialBaseCfg(static_friction=1.0, dynamic_friction=1.0)
         self.sim.physics = PhysicsCfg()
-        # visualizer settings: frame both hands and the object between them
-        self.sim.default_visualizer_cfg = VisualizerCfg(
-            eye=(1.15, -1.65, 1.15), lookat=(0.0, -0.5, 0.55), focal_length=35.0
-        )
+        self.sim.default_visualizer_cfg = clone(VISUALIZER_CFG)

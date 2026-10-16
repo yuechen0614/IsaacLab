@@ -24,15 +24,10 @@ Args:
     disable_fabric: Whether to disable fabric and use USD I/O operations.
 """
 
-"""Launch Isaac Sim Simulator first."""
-
 import argparse
 
-from isaaclab.app import AppLauncher, scan
+from isaaclab.app import add_launcher_args, launch_simulation
 
-from isaaclab_tasks.utils import resolve_task_config
-
-# add argparse arguments
 parser = argparse.ArgumentParser(description="Evaluate robomimic policy for Isaac Lab environment.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
@@ -60,24 +55,12 @@ parser.add_argument(
     "--norm_factor_max", type=float, default=None, help="Optional: maximum value of the normalization factor."
 )
 
-# append AppLauncher cli args
-AppLauncher.add_app_launcher_args(parser)
-# parse the arguments, forwarding unrecognized ones as Hydra-style task config overrides
+add_launcher_args(parser)
+# parse the arguments, forwarding unrecognized ones as Hydra-style task config overrides.
+# ``overrides`` must be passed explicitly to the config parser: this script keeps its own flags in
+# ``sys.argv`` rather than stripping them, so letting Hydra fall back to reading ``sys.argv`` makes it
+# reject them.
 args_cli, hydra_overrides = parser.parse_known_args()
-
-# launch omniverse app
-# Only enable rendering for tasks that actually declare Kit camera sensors: this script also
-# evaluates policies trained on low-dimensional observations, which should not pay for the RTX
-# renderer. ``resolve_task_config`` is safe to call before Kit is launched, and ``scan`` is the
-# same detection ``launch_simulation`` uses, so this matches how camera enabling is resolved
-# elsewhere now that the ``--enable_cameras`` flag is gone.
-# ``overrides`` must be passed explicitly: this script keeps its own flags in ``sys.argv`` rather
-# than stripping them, so letting Hydra fall back to reading ``sys.argv`` makes it reject them.
-env_cfg_for_scan, _ = resolve_task_config(args_cli.task, "", overrides=hydra_overrides)
-app_launcher = AppLauncher(args_cli, enable_cameras=scan(env_cfg_for_scan, args_cli).has_kit_camera)
-simulation_app = app_launcher.app
-
-"""Rest everything follows."""
 
 import copy
 import os
@@ -88,6 +71,8 @@ import gymnasium as gym
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.torch_utils as TorchUtils
 import torch
+
+from isaaclab.envs.utils._manual_success import _prepare_success_term
 
 from isaaclab_tasks.utils import parse_env_cfg
 
@@ -241,12 +226,19 @@ def main() -> None:
     env_cfg.recorders = None
 
     # Extract success checking function
-    success_term = env_cfg.terminations.success
-    env_cfg.terminations.success = None
+    success_term = _prepare_success_term(env_cfg)
 
     # Set evaluation settings
     env_cfg.eval_mode = True
 
+    # Launch the runtime the task needs. Camera rendering is only enabled for tasks that declare Kit
+    # camera sensors, so policies trained on low-dimensional observations do not pay for the RTX renderer.
+    with launch_simulation(env_cfg, args_cli):
+        evaluate_models(env_cfg, success_term)
+
+
+def evaluate_models(env_cfg, success_term) -> None:
+    """Create the environment and evaluate every checkpoint under each evaluation setting."""
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
 
@@ -338,7 +330,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # run the main function
     main()
-    # close sim app
-    simulation_app.close()

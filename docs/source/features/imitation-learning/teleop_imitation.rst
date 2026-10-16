@@ -201,10 +201,10 @@ the key bindings are:
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For tasks that benefit from the use of an extended reality (XR) device with hand tracking,
-Isaac Lab supports using `Isaac Teleop <https://github.com/NVIDIA/IsaacTeleop>`_ with NVIDIA CloudXR
+Isaac Lab supports using `Isaac Capture <https://github.com/NVIDIA/IsaacCapture>`_ with NVIDIA CloudXR
 to immersively stream the scene to compatible XR devices for teleoperation.
 
-Follow the steps in :ref:`cloudxr-teleoperation` to learn how to install Isaac Teleop and set up CloudXR for
+Follow the steps in :ref:`cloudxr-teleoperation` to learn how to install Isaac Capture and set up CloudXR for
 teleoperation. Once you have set it up, you can launch the cube stacking environment with the follow command to try it out
 with an XR headset. Note that when using hand tracking, we recommend using the absolute action space
 variant of the task (``IsaacContrib-Stack-Cube-Franka-IK-Abs``):
@@ -263,7 +263,7 @@ Select the tab that matches your input device:
    .. tab-item:: XR Headset (Meta Quest / Pico)
 
       When using hand tracking via an XR headset, use the absolute action space
-      variant of the task and omit ``--teleop_device``. The IsaacTeleop pipeline
+      variant of the task and omit ``--teleop_device``. The Isaac Capture pipeline
       is activated automatically via the ``--xr`` flag.
 
       .. code:: bash
@@ -316,7 +316,7 @@ Step 2: Synthetic Data Generation using Isaac Lab Mimic
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 We provide a pre-recorded HDF5 dataset containing 10 human demonstrations for the cube stacking task
-here: `[Cube Stacking Human Dataset] <https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.1/Isaac/IsaacLab/Mimic/franka_stack_datasets/dataset.hdf5>`__.
+here: `[Cube Stacking Human Dataset] <https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.2/Isaac/IsaacLab/Mimic/franka_stack_datasets/dataset.hdf5>`__.
 If you skipped :ref:`Step 1: Human Data Collection <teleop-imitation-step-1-human-data-collection>`, you can download this dataset and use it in the remaining tutorial steps.
 
 Place the dataset in the ``IsaacLab/datasets`` folder. You may need to create the folder if you skipped Step 1 and
@@ -444,6 +444,8 @@ Inspect the generated data (``generated_dataset_small.hdf5``) and if satisfactor
 
 
 The number of demonstrations ``--generation_num_trials`` can be adjusted to your policy needs.
+Use ``--max_num_failures`` to stop after a specified number of failed attempts when a task rarely succeeds.
+Without this option, generation continues until the requested number of demonstrations succeeds.
 1000 demonstrations have been shown to provide good training results for the BC RNN policy used in this tutorial.
 
 The number of environments in the ``--num_envs`` parameter can be adjusted to speed up or slow down data generation.
@@ -501,7 +503,11 @@ Using the Isaac Lab Mimic generated data we can now train a state-based BC RNN a
          uv run --extra isaacsim,mimic python scripts/imitation_learning/robomimic/train.py \
          --task IsaacContrib-Stack-Cube-Franka-IK-Rel \
          --algo bc \
+         --epochs 1000 \
          --dataset ./datasets/generated_dataset.hdf5
+
+      This command overrides the configuration's default of 2000 epochs to train for 1000 epochs,
+      matching the training-time estimate below.
 
    .. tab-item:: Visuomotor policy
       :sync: visuomotor

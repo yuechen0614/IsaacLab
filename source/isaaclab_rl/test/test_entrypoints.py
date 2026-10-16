@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import os
+import signal
 import subprocess
 import sys
 import types
@@ -21,15 +23,18 @@ import numpy as np
 import pytest
 import torch
 
+from isaaclab import cli
+from isaaclab.envs import DirectMARLEnvCfg, DirectRLEnvCfg
+
 from isaaclab_rl.entrypoints import PlaybackRequest, SimpleAgentRequest, TrainingRequest, api, dispatch, simple_agents
-from isaaclab_rl.entrypoints.simple_agents import create_zero_action_policy
+from isaaclab_rl.entrypoints.backends.cli_args_rsl_rl import checkpoint_load_cfg
+from isaaclab_rl.entrypoints.simple_agents import create_random_action_policy, create_zero_action_policy
 
 
 @pytest.mark.parametrize(
     ("statement", "unexpected_modules"),
     [
         ("import isaaclab_rl", ["isaaclab_rl.entrypoints", "torch"]),
-        ("import isaaclab_rl.entrypoints", ["isaaclab_rl.entrypoints.multigpu", "torch"]),
         ("import isaaclab_rl.entrypoints.backends", ["torch"]),
         # the LEAPP runtime must only load once the simulation has launched
         ("import isaaclab_rl.entrypoints.backends.export_rsl_rl", ["leapp", "isaaclab.utils.leapp"]),
@@ -37,12 +42,9 @@ from isaaclab_rl.entrypoints.simple_agents import create_zero_action_policy
         ("import isaaclab_rl.rl_games.pbt", ["isaaclab_rl.rl_games.pbt.pbt", "rl_games", "torch"]),
         ("import isaaclab_rl.rsl_rl", ["isaaclab_rl.rsl_rl.vecenv_wrapper", "rsl_rl", "torch"]),
         ("import isaaclab_rl.utils", ["torch"]),
+        # resolves through isaaclab_rl.entrypoints, so it also covers importing that package directly
         (
             "from isaaclab_rl import run_play_cli",
-            ["isaaclab_rl.entrypoints.multigpu", "torch"],
-        ),
-        (
-            "from isaaclab_rl.entrypoints import run_play_cli",
             ["isaaclab_rl.entrypoints.multigpu", "torch"],
         ),
     ],
@@ -73,6 +75,7 @@ def test_zero_agent_infers_finite_manager_actions() -> None:
         action_dim = 7
         cfg = SimpleNamespace(controller=SimpleNamespace(use_relative_mode=False, command_type="pose"))
         _scale = torch.tensor([2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0])
+        _offset = torch.tensor([0.2, -0.4, 0.6, 0.0, 0.0, 0.0, 0.0])
 
         def _compute_frame_pose(self):
             return torch.tensor([[2.0, 4.0, 6.0]]), torch.tensor([[0.0, 0.0, 0.0, 1.0]])
@@ -150,7 +153,7 @@ def test_zero_agent_infers_finite_manager_actions() -> None:
     ).flatten(start_dim=1)
     expected = torch.cat(
         (
-            torch.tensor([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]]),
+            torch.tensor([[0.9, 2.2, 2.7, 0.0, 0.0, 0.0, 1.0]]),
             torch.tensor([[3.0, 2.0, 1.0, 0.0, 0.0, 1.0, 0.0]]),
             expected_pink_poses,
             torch.tensor([[0.2, 0.4]]),
@@ -171,6 +174,7 @@ def test_zero_agent_rejects_non_finite_inferred_actions() -> None:
         action_dim = 7
         cfg = SimpleNamespace(controller=SimpleNamespace(use_relative_mode=False, command_type="pose"))
         _scale = torch.ones(7)
+        _offset = torch.zeros(7)
 
         def _compute_frame_pose(self):
             return torch.full((1, 3), torch.nan), torch.tensor([[0.0, 0.0, 0.0, 1.0]])
@@ -198,6 +202,7 @@ def test_zero_agent_supports_composite_direct_action_spaces() -> None:
     )
     unwrapped = SimpleNamespace(
         action_manager=None,
+        cfg=DirectRLEnvCfg(),
         single_action_space=action_space,
         device="cpu",
         num_envs=2,
@@ -209,53 +214,75 @@ def test_zero_agent_supports_composite_direct_action_spaces() -> None:
     assert torch.equal(actions["discrete"], torch.zeros(2, 1, dtype=torch.int64))
 
 
-def test_zero_agent_supports_direct_multi_agent_action_spaces() -> None:
-    """Direct multi-agent environments receive a zero action for every agent."""
+@pytest.mark.parametrize("policy_name", ["zero", "random"])
+def test_simple_agents_support_direct_multi_agent_action_spaces(policy_name: simple_agents.PolicyName) -> None:
+    """Direct MARL playback receives batched actions for every agent from either policy."""
     unwrapped = SimpleNamespace(
+        cfg=DirectMARLEnvCfg(),
         action_manager=None,
         action_spaces={
             "robot": gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-            "object": gym.spaces.Discrete(2),
+            "object": (
+                gym.spaces.Discrete(2)
+                if policy_name == "zero"
+                else gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
+            ),
         },
         device="cpu",
         num_envs=3,
     )
+    env = SimpleNamespace(unwrapped=unwrapped, action_space=unwrapped.action_spaces.__getitem__)
+    create_policy = create_zero_action_policy if policy_name == "zero" else create_random_action_policy
+    policy = create_policy(env)
+    actions = policy()
 
-    actions = create_zero_action_policy(SimpleNamespace(unwrapped=unwrapped))()
+    assert set(actions) == {"robot", "object"}
+    assert actions["robot"].shape == (3, 2)
+    assert actions["object"].shape == (3, 1)
+    if policy_name == "zero":
+        assert torch.equal(actions["robot"], torch.zeros(3, 2))
+        assert torch.equal(actions["object"], torch.zeros(3, 1, dtype=torch.int64))
+    else:
+        next_actions = policy()
+        for agent in actions:
+            for sample in (actions[agent], next_actions[agent]):
+                assert sample.shape == actions[agent].shape
+                assert sample.dtype == torch.float32
+                assert sample.device == torch.device("cpu")
+                assert torch.all((sample >= -1) & (sample <= 1))
+            assert not torch.equal(actions[agent], next_actions[agent])
 
-    assert torch.equal(actions["robot"], torch.zeros(3, 2))
-    assert torch.equal(actions["object"], torch.zeros(3, 1, dtype=torch.int64))
 
-
-@pytest.mark.parametrize("policy", ["zero", "random"])
-def test_simple_agents_default_to_newton_visualizer(
-    policy: simple_agents.PolicyName,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Checkpoint-free agents default to Newton visualization."""
+def test_simple_agents_parse_device_and_default_to_newton_visualizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Checkpoint-free agents default to Newton visualization and retain an explicit CLI device."""
     monkeypatch.setattr(sys, "argv", ["pytest"])
 
-    args = simple_agents._parse_args([], policy)
+    args = simple_agents._parse_args([], "zero")
 
     assert args.device is None
     assert args.visualizer == ["newton_gl"]
 
-
-@pytest.mark.parametrize("policy", ["zero", "random"])
-def test_simple_agents_accept_explicit_device(
-    policy: simple_agents.PolicyName,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Checkpoint-free agents should retain an explicit CLI device."""
-    monkeypatch.setattr(sys, "argv", ["pytest"])
-
-    args = simple_agents._parse_args(["--device", "cuda:1"], policy)
+    args = simple_agents._parse_args(["--device", "cuda:1"], "random")
 
     assert args.device == "cuda:1"
 
 
-def test_simple_agents_preserve_task_device_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Checkpoint-free agents should not replace a task-required device with the CLI default."""
+@pytest.mark.parametrize(
+    ("cli_device", "expected_device", "policy"),
+    [
+        # a task-required device is not replaced with the CLI default
+        (None, "cpu", "zero"),
+        # an explicit CLI device overrides the task default
+        ("cuda:1", "cuda:1", "random"),
+    ],
+)
+def test_simple_agents_resolve_simulation_device(
+    cli_device: str | None,
+    expected_device: str,
+    policy: simple_agents.PolicyName,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checkpoint-free agents keep the task device unless the CLI selects one."""
 
     class _ExpectedStop(Exception):
         pass
@@ -269,14 +296,14 @@ def test_simple_agents_preserve_task_device_default(monkeypatch: pytest.MonkeyPa
 
     args = SimpleNamespace(
         num_envs=None,
-        device=None,
+        device=cli_device,
         disable_fabric=False,
         task="Cpu-Task",
     )
 
     def launch_simulation(cfg, launcher_args):
-        assert cfg.sim.device == "cpu"
-        assert launcher_args.device == "cpu"
+        assert cfg.sim.device == expected_device
+        assert launcher_args.device == expected_device
         raise _ExpectedStop
 
     monkeypatch.setattr(simple_agents, "_parse_args", lambda argv, policy: args)
@@ -284,40 +311,7 @@ def test_simple_agents_preserve_task_device_default(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(simple_agents, "launch_simulation", launch_simulation)
 
     with pytest.raises(_ExpectedStop):
-        simple_agents.run([], policy="zero")
-
-
-def test_simple_agents_apply_explicit_device_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Checkpoint-free agents should continue to honor an explicit CLI device."""
-
-    class _ExpectedStop(Exception):
-        pass
-
-    class _Cfg:
-        scene = SimpleNamespace(num_envs=1)
-        sim = SimpleNamespace(device="cpu", use_fabric=True)
-
-        def validate(self) -> None:
-            pass
-
-    args = SimpleNamespace(
-        num_envs=None,
-        device="cuda:1",
-        disable_fabric=False,
-        task="Cpu-Task",
-    )
-
-    def launch_simulation(cfg, launcher_args):
-        assert cfg.sim.device == "cuda:1"
-        assert launcher_args.device == "cuda:1"
-        raise _ExpectedStop
-
-    monkeypatch.setattr(simple_agents, "_parse_args", lambda argv, policy: args)
-    monkeypatch.setattr(simple_agents, "resolve_task_config", lambda task, agent: (_Cfg(), None))
-    monkeypatch.setattr(simple_agents, "launch_simulation", launch_simulation)
-
-    with pytest.raises(_ExpectedStop):
-        simple_agents.run([], policy="random")
+        simple_agents.run([], policy=policy)
 
 
 def test_zero_agent_rejects_invalid_config_before_launch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -343,10 +337,15 @@ def test_zero_agent_rejects_invalid_config_before_launch(monkeypatch: pytest.Mon
         simple_agents.run([], policy="zero")
 
 
-def test_random_agent_closes_environment_after_keyboard_interrupt(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Ctrl+C must stop a checkpoint-free agent cleanly and close its environment."""
+@pytest.mark.parametrize("interrupted_operation", ["reset", "step"])
+def test_random_agent_closes_environment_after_keyboard_interrupt(monkeypatch, interrupted_operation) -> None:
+    """An interrupt during setup or playback closes the environment."""
+    close_handlers = []
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def close():
+        close_handlers.append(signal.getsignal(signal.SIGINT))
+
     cfg = SimpleNamespace(
         scene=SimpleNamespace(num_envs=1),
         sim=SimpleNamespace(device="cpu", use_fabric=True),
@@ -356,13 +355,14 @@ def test_random_agent_closes_environment_after_keyboard_interrupt(
         observation_space="observations",
         action_space=SimpleNamespace(shape=(1, 1)),
         unwrapped=SimpleNamespace(
-            sim=SimpleNamespace(is_headless_or_exist_active_visualizer=lambda: True),
+            sim=SimpleNamespace(is_running=lambda: True),
             device="cpu",
         ),
-        reset=lambda: None,
-        step=mock.Mock(side_effect=KeyboardInterrupt),
-        close=mock.Mock(),
+        reset=mock.Mock(),
+        step=mock.Mock(),
+        close=close,
     )
+    getattr(env, interrupted_operation).side_effect = KeyboardInterrupt
     args = SimpleNamespace(max_steps=None, task="Example", device=None)
     monkeypatch.setattr(simple_agents, "_parse_args", lambda argv, policy: args)
     monkeypatch.setattr(simple_agents, "resolve_task_config", lambda task, agent: (cfg, None))
@@ -370,10 +370,11 @@ def test_random_agent_closes_environment_after_keyboard_interrupt(
     monkeypatch.setattr(simple_agents.gym, "make", lambda task, cfg: env)
     monkeypatch.setattr(simple_agents, "create_random_action_policy", lambda environment: lambda: None)
 
-    simple_agents.run([], policy="random")
+    with pytest.raises(KeyboardInterrupt):
+        simple_agents.run([], policy="random")
 
-    env.close.assert_called_once_with()
-    assert "Random agent stopped." in capsys.readouterr().out
+    assert close_handlers == [signal.SIG_DFL]
+    assert signal.getsignal(signal.SIGINT) is previous_handler
 
 
 @pytest.mark.parametrize(
@@ -406,7 +407,7 @@ def test_simple_agent_video_step_budget(
         observation_space="observations",
         action_space=SimpleNamespace(shape=(1, 1)),
         unwrapped=SimpleNamespace(
-            sim=SimpleNamespace(is_headless_or_exist_active_visualizer=lambda: True),
+            sim=SimpleNamespace(is_running=lambda: True),
             device="cpu",
         ),
         reset=lambda: None,
@@ -456,6 +457,7 @@ def test_train_request_adapts_typed_parameters_to_cli(monkeypatch) -> None:
         TrainingRequest(
             backend="rsl_rl",
             task="Isaac-Cartpole",
+            checkpoint="latest",
             num_envs=32,
             max_iterations=10,
             distributed=True,
@@ -469,6 +471,8 @@ def test_train_request_adapts_typed_parameters_to_cli(monkeypatch) -> None:
         "rsl_rl",
         "--task",
         "Isaac-Cartpole",
+        "--checkpoint",
+        "latest",
         "--num_envs",
         "32",
         "--max_iterations",
@@ -476,24 +480,6 @@ def test_train_request_adapts_typed_parameters_to_cli(monkeypatch) -> None:
         "--distributed",
         "physics=newton_mjwarp",
     ]
-
-
-def test_train_request_maps_checkpoint_to_backend_argument(monkeypatch) -> None:
-    """Training requests forward a checkpoint so training can resume from it."""
-    received: list[str] = []
-
-    def fake_run_train_cli(argv: list[str]) -> int:
-        received.extend(argv)
-        return 0
-
-    monkeypatch.setattr(api, "run_train_cli", fake_run_train_cli)
-
-    api.train(TrainingRequest(backend="rsl_rl", task="Isaac-Cartpole", checkpoint="latest"))
-    assert received == ["--rl_library", "rsl_rl", "--task", "Isaac-Cartpole", "--checkpoint", "latest"]
-
-    received.clear()
-    api.train(TrainingRequest(backend="rlinf", task="Isaac-Task", checkpoint="model"))
-    assert received == ["--rl_library", "rlinf", "--task", "Isaac-Task", "--checkpoint", "model"]
 
 
 def test_rlinf_parser_uses_unified_checkpoint_and_iteration_flags() -> None:
@@ -524,6 +510,16 @@ def test_rlinf_rejects_pretrained_checkpoint() -> None:
         resolve_rlinf_checkpoint("pretrained", log_root_path="logs/rlinf", task="Isaac-Task", config_name="ppo")
 
 
+def test_rlinf_environment_disables_ray_uv_upload(tmp_path: Path, monkeypatch) -> None:
+    """Shared RLinf setup, used by training and playback, disables Ray's ``uv run`` project upload."""
+    from isaaclab_rl.entrypoints.backends.cli_args_rlinf import configure_rlinf_environment
+
+    monkeypatch.setattr(os, "environ", {})
+    configure_rlinf_environment("ppo", str(tmp_path))
+
+    assert os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] == "0"
+
+
 def test_run_backend_restores_sys_argv_after_training(monkeypatch) -> None:
     """A training backend that mutates ``sys.argv`` must not leak the change to the caller."""
     module = types.ModuleType("fake_train_backend")
@@ -542,7 +538,7 @@ def test_run_backend_restores_sys_argv_after_training(monkeypatch) -> None:
 
 
 def test_play_request_uses_unified_checkpoint_argument(monkeypatch) -> None:
-    """RLinf requests map shared fields to its focused backend arguments."""
+    """Playback requests map shared fields, including the checkpoint, to CLI arguments."""
     received: list[str] = []
 
     def fake_run_play_cli(argv: list[str]) -> int:
@@ -598,9 +594,14 @@ def test_export_dispatches_selected_backend(monkeypatch) -> None:
 
 
 def test_dispatch_uses_task_registered_default_backend(monkeypatch) -> None:
-    """A task registry default selects the backend when the CLI omits it."""
+    """Direct workers discover downstream tasks before selecting their registered default backend."""
     task_name = "Isaac-DefaultAgentDispatchTest"
-    gym.register(id=task_name, entry_point="dummy:Env", kwargs={"default_agent": "rsl_rl"})
+    entry_point = SimpleNamespace(
+        load=lambda: gym.register(id=task_name, entry_point="dummy:Env", kwargs={"default_agent": "rsl_rl"})
+    )
+    monkeypatch.setattr(
+        cli.importlib.metadata, "entry_points", lambda *, group: [entry_point] if group == "isaaclab.tasks" else []
+    )
     monkeypatch.setitem(sys.modules, "isaaclab_tasks", types.ModuleType("isaaclab_tasks"))
     received: dict[str, object] = {}
     monkeypatch.setattr(
@@ -692,7 +693,7 @@ def test_failed_rsl_training_restores_torch_backend_state(monkeypatch) -> None:
 
     from isaaclab_rl.entrypoints.backends import train_rsl_rl
 
-    caller_state = (False, False, True, True)
+    caller_state = (False, False, True, False)
     settings = (
         (torch.backends.cuda.matmul, "allow_tf32"),
         (torch.backends.cudnn, "allow_tf32"),
@@ -705,7 +706,7 @@ def test_failed_rsl_training_restores_torch_backend_state(monkeypatch) -> None:
     monkeypatch.setattr(train_rsl_rl, "_parse_args", lambda argv: types.SimpleNamespace())
 
     def fail_after_mutation(_args_cli) -> None:
-        assert _torch_backend_state() == (True, True, False, False)
+        assert _torch_backend_state() == (True, True, False, True)
         raise RuntimeError("failed")
 
     monkeypatch.setattr(train_rsl_rl, "_run", fail_after_mutation)
@@ -736,7 +737,14 @@ def test_rsl_training_registers_external_task_before_agent_discovery(monkeypatch
     monkeypatch.setattr(
         sys,
         "argv",
-        ["train.py", "--task", task_name, "--external_callback", f"{callback_module_name}.register_task"],
+        [
+            "train.py",
+            "--task",
+            task_name,
+            "--external_callback",
+            f"{callback_module_name}.register_task",
+            "--no-resume_optimizer_state",
+        ],
     )
     gym.registry.pop(task_name, None)
 
@@ -746,6 +754,7 @@ def test_rsl_training_registers_external_task_before_agent_discovery(monkeypatch
         gym.registry.pop(task_name, None)
 
     assert args.task == task_name
+    assert not args.resume_optimizer_state
 
 
 def test_skrl_training_restores_jax_backend(monkeypatch) -> None:
@@ -814,17 +823,6 @@ def test_humanoid_amp_tasks_register_canonical_skrl_config(motion) -> None:
     assert load_cfg_from_registry(spec.id, "skrl_cfg_entry_point")["agent"]["class"] == "AMP"
 
 
-def test_skrl_entrypoints_do_not_infer_algorithm_from_registry_key() -> None:
-    """Registry-key spelling is a config-source concern, never an algorithm identity."""
-    root = Path(__file__).parents[3]
-    paths = list(root.glob("source/isaaclab*/**/*skrl.py"))
-    for path in paths:
-        source = path.read_text()
-
-        assert 'split("_cfg")' not in source, path
-        assert 'agent_library="skrl"' not in source, path
-
-
 def test_skrl_play_restores_jax_backend(monkeypatch) -> None:
     """SKRL playback removes the JAX backend setting it created after an exception."""
     skrl = pytest.importorskip("skrl")
@@ -849,3 +847,64 @@ def test_skrl_play_restores_jax_backend(monkeypatch) -> None:
         play_skrl.run([])
 
     assert not hasattr(skrl.config.jax, "backend")
+
+
+@pytest.mark.parametrize("resume_optimizer_state", [False, True])
+@pytest.mark.parametrize("runner_class", ["OnPolicyRunner", "DistillationRunner"])
+def test_rsl_rl_checkpoint_preserves_selected_optimizer_state(
+    tmp_path, resume_optimizer_state: bool, runner_class: str
+) -> None:
+    """Runner continuation restores models, iteration, and RND while optionally resetting the policy optimizer."""
+    pytest.importorskip("rsl_rl")
+    from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+    from tensordict import TensorDict
+
+    distillation = runner_class == "DistillationRunner"
+    runner_type = DistillationRunner if distillation else OnPolicyRunner
+    model_names = ("student", "teacher") if distillation else ("actor", "critic")
+    obs = TensorDict({"obs": torch.ones(1, 2)}, batch_size=[1])
+    env = SimpleNamespace(
+        get_observations=lambda: obs, num_envs=1, num_actions=1, cfg={}, unwrapped=SimpleNamespace(step_dt=0.01)
+    )
+
+    def make_runner(learning_rate):
+        cfg = {
+            "num_steps_per_env": 15,
+            "obs_groups": {name: ["obs"] for name in (*model_names, "rnd_state")},
+            "algorithm": {"class_name": "Distillation" if distillation else "PPO", "learning_rate": learning_rate},
+            **{name: {"class_name": "MLPModel", "hidden_dims": [4]} for name in model_names},
+        }
+        if not distillation:
+            cfg["algorithm"]["rnd_cfg"] = {
+                "num_outputs": 2,
+                "predictor_hidden_dims": [4],
+                "target_hidden_dims": [4],
+                "weight": 1.0,
+                "learning_rate": learning_rate,
+            }
+        return runner_type(env, cfg, device="cpu")
+
+    source = make_runner(3e-4)
+    source.alg.get_policy()(obs).sum().backward()
+    source.alg.optimizer.step()
+    if not distillation:
+        source.alg.rnd.predictor(obs["obs"]).sum().backward()
+        source.alg.rnd.optimizer.step()
+    source.current_learning_iteration = 17
+    checkpoint = str(tmp_path / "model.pt")
+    source.save(checkpoint)
+    destination = make_runner(1e-5)
+    destination.load(checkpoint, load_cfg=checkpoint_load_cfg(resume_optimizer_state, runner_class=runner_class))
+
+    assert destination.current_learning_iteration == source.current_learning_iteration
+    if distillation:
+        assert destination.alg.teacher_loaded
+    source_state, destination_state = source.alg.save(), destination.alg.save()
+    for key in source_state:
+        if key != "optimizer_state_dict":
+            torch.testing.assert_close(destination_state[key], source_state[key])
+    assert destination.alg.optimizer.param_groups[0]["lr"] == (3e-4 if resume_optimizer_state else 1e-5)
+    if not resume_optimizer_state:
+        assert not destination.alg.optimizer.state
+    else:
+        torch.testing.assert_close(destination_state["optimizer_state_dict"], source_state["optimizer_state_dict"])

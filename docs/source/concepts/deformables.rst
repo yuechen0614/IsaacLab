@@ -48,7 +48,7 @@ use a separate asset and solver; see :doc:`/source/concepts/using_mpm`.
 
 .. note::
     All three kinds are under active development. On Newton, deformables are implemented in
-    :mod:`isaaclab_contrib.deformable` and re-exported through :mod:`isaaclab_newton.assets`.
+    :mod:`isaaclab_newton.assets`, alongside rigid objects and articulations.
     Cable support in particular is experimental: its spawner cfg, asset class, and material
     defaults may still change.
 
@@ -80,10 +80,10 @@ Backend support
 On Newton, deformables of every kind are simulated by the VBD solver, so a scene containing them
 must select a physics cfg whose solver is VBD. For the solver parameters, for running a rigid robot
 and a deformable in one scene, and for the tuning workflow, see
-:doc:`/source/concepts/solver-tuning/tune_vbd` and :doc:`/source/concepts/coupled_solvers`.
+:doc:`/source/how-to/solver_tuning_vbd` and :doc:`/source/concepts/coupled_solvers`.
 
 OvPhysX deformables carry further restrictions on node counts and startup cost. See
-:doc:`/source/concepts/ovphysx`.
+:doc:`/source/concepts/physics-backends/ovphysx`.
 
 
 Volume and surface deformables
@@ -165,7 +165,7 @@ A surface deformable is authored the same way, with a 2D mesh spawner and a surf
 
 The material values above are the tuned ones from ``Isaac-Lift-Cloth-Franka`` rather than the
 defaults. For what each parameter does and what it defaults to, see
-:doc:`/source/concepts/solver-tuning/tune_vbd`, which also covers cloth self-contact. Self-contact
+:doc:`/source/how-to/solver_tuning_vbd`, which also covers cloth self-contact. Self-contact
 is off by default, so cloth passes through itself until it is enabled.
 
 ``edge_refinement`` sets the simulation resolution for both kinds: the maximum surface edge length
@@ -387,7 +387,7 @@ where ``L_parent`` and ``L_child`` are the rest lengths of the two segments it s
     Lab authors has no attribute for it.
 
 To target a specific axial ``E * A`` or bending ``E * I``, invert these relations to pick the
-modulus; ``scripts/demos/cables.py`` does this from a target stiffness and the segment geometry.
+modulus; ``examples/cables.py`` does this from a target stiffness and the segment geometry.
 
 Cable collision
 ^^^^^^^^^^^^^^^
@@ -475,8 +475,6 @@ Cable limitations
   and end fittings that must transfer orientation are not representable.
 * **No damping knobs.** The four stiffness moduli are exposed; their damping counterparts are not.
 * **CPU-only render sync** (NVBug 6502662); periodic curves are not synced.
-* **Culled by Isaac RTX scene partitioning** once the cable deforms beyond its initial extent
-  (OMPE-105749). See :ref:`known-issues-animated-curve-scene-partition`.
 
 .. note::
     An attachment joint is created only when the attachment stiffness is unauthored or infinite. A
@@ -571,38 +569,46 @@ Cable
     winding, since leaving it unset falls back to the bend value as described above.
 
 
-Demos and tasks
----------------
+Examples and tasks
+------------------
 
-Run a demo first to confirm that the spawner, solver, and visualizer all work in your environment.
+Run an example first to confirm that the spawner, solver, and visualizer all work in your environment.
 
 .. list-table::
     :header-rows: 1
     :widths: 20 44 36
 
     * - Kind
-      - Demo
+      - Example
       - Tasks
     * - Volume
-      - ``scripts/demos/deformables.py``
+      - ``deformables``
       - ``Isaac-Lift-Soft-Franka``, ``Isaac-Lift-Soft-Franka-Camera``
     * - Surface
-      - ``scripts/demos/deformables.py``
+      - ``deformables``
       - ``Isaac-Lift-Cloth-Franka``, ``Isaac-Lift-Cloth-Franka-Camera``
     * - Cable
-      - ``scripts/demos/cables.py``
+      - ``cables``
       - ``Isaac-Lift-Cable-Franka``, ``Isaac-Lift-Cable-Franka-Camera``
 
 .. code-block:: bash
 
     # Volume and surface deformables falling onto a ground plane.
-    uv run --extra isaacsim --extra tetrahedralization python scripts/demos/deformables.py
+    uv run --extra tetrahedralization isaaclab example deformables
 
     # A pile of cables that collide and settle. Newton VBD only.
-    uv run --extra isaacsim python scripts/demos/cables.py
+    uv run isaaclab example cables
 
     # A larger cable pile, without a visualizer, stopping after a fixed number of steps.
-    uv run python scripts/demos/cables.py --visualizer none --num_cables 40 --num_segments 15 --max_steps 500
+    uv run isaaclab example cables --visualizer none --num_cables 40 --num_segments 15 --max_steps 500
+
+Try :ref:`VBD cable bending <interactive-demo-cable-bending>` for a compact browser lesson with one
+clamped VBD rod, live bending stiffness and a downward tip load. It illustrates
+transient response; use the native example for cable piles and measured comparisons.
+
+For learned manipulation, try the :ref:`soft-body <interactive-demo-franka-soft>` and
+:ref:`cloth <interactive-demo-franka-cloth>` browser policies. Tune their material,
+move the target, or switch to keyboard end-effector control in Manual mode.
 
 ``scripts/environments/state_machine/lift_franka_soft.py`` drives ``Isaac-Lift-Soft-Franka`` with a
 scripted state machine, which is a useful starting point for a deformable manipulation task.
@@ -612,11 +618,11 @@ Related
 -------
 
 * :ref:`tutorial-interact-deformable-object` walks through a volume deformable step by step.
-* :doc:`/source/concepts/solver-tuning/tune_vbd` covers the VBD solver parameters, the Newton
+* :doc:`/source/how-to/solver_tuning_vbd` covers the VBD solver parameters, the Newton
   material tables, cloth self-contact, and the tuning workflow.
 * :doc:`/source/concepts/coupled_solvers` covers running a rigid robot and a deformable in one
   scene.
 * :ref:`migrating-deformables` covers the Isaac Lab 3.0 deformable API changes.
-* :doc:`/source/concepts/ovphysx` covers the OvPhysX deformable limitations.
+* :doc:`/source/concepts/physics-backends/ovphysx` covers the OvPhysX deformable limitations.
 * :doc:`/source/api/lab/isaaclab.assets` and :doc:`/source/api/lab/isaaclab.sim.spawners` are the
   API references for the asset, spawner, and material classes used here.

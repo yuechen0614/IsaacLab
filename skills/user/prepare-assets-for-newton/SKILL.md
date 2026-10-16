@@ -15,7 +15,7 @@ Read the [asset migration guide](../../../docs/source/how-to/prepare_asset_for_n
 
 1D cable / rod assets are out of scope here: they are authored fresh as Newton deformables (Newton + VBD only), not converted from a PhysX rigid asset. See the [Deformables guide](../../../docs/source/concepts/deformables.rst).
 
-Implicit MPM particle assets and rigid-MPM coupling are also out of scope; see the [Using Implicit MPM guide](../../../docs/source/concepts/using_mpm.rst).
+Implicit MPM particle assets and rigid-MPM coupling are also out of scope; see the [Implicit MPM page](../../../docs/source/concepts/using_mpm.rst).
 
 ## Workflow
 
@@ -42,6 +42,6 @@ Keep this skill synchronized section-for-section with the asset migration guide 
 - [Compact reference](reference.md)
 - [Examples](examples.md)
 - [Evaluations](evaluations.md)
-- [MJWarp solver tuning](../../../docs/source/concepts/solver-tuning/tune_mjwarp.rst)
+- [MJWarp solver tuning](../../../docs/source/how-to/solver_tuning_mjwarp.rst)
 - [Schema configuration classes](../../../docs/source/concepts/schema_cfgs.rst)
 - [Newton Simulation Tuning guide](https://newton-physics.github.io/newton/latest/concepts/simulation_tuning.html)

@@ -203,6 +203,9 @@ class VideoRecorder:
         viz = candidates[0]
         if not sim.is_rendering:
             sim.forward()
+            # Continuous rendering dispatches marker callbacks in update_visualizers(); capture must too.
+            if viz.supports_markers():
+                sim.vis_marker_registry.dispatch_callbacks()
         if sub == "streaming_view":
             if not hasattr(viz, "render_tiled_rgb_array"):
                 raise RuntimeError(
@@ -241,7 +244,7 @@ class VideoRecorder:
         return frame
 
     def _frame_from_sensor(self, name: str, gt_type: str = "rgb") -> np.ndarray | None:
-        from isaaclab.envs.utils.camera_colorizer import (
+        from .camera_colorizer import (
             SUPPORTED_GT_TYPES,
             CameraFrameColorizer,
             sensor_key_for_gt_type,

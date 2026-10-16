@@ -57,6 +57,9 @@ class RslRlMLPModelCfg:
         std_type: Literal["scalar", "log"] = "scalar"
         """The parameterization type of the output distribution's standard deviation. Default is scalar."""
 
+        std_range: tuple[float, float] = (1e-6, 1e6)
+        """The (min, max) range the output distribution's standard deviation is clamped to. Default is (1e-6, 1e6)."""
+
     @configclass
     class HeteroscedasticGaussianDistributionCfg(GaussianDistributionCfg):
         """Configuration for the heteroscedastic Gaussian output distribution."""
@@ -214,6 +217,9 @@ class RslRlPpoAlgorithmCfg:
     share_cnn_encoders: bool = False
     """Whether to share the CNN networks between actor and critic, in case CNNModels are used. Defaults to False."""
 
+    use_mixed_precision: bool = False
+    """Whether to run the policy update in bfloat16 autocast. Defaults to False."""
+
     rnd_cfg: RslRlRndCfg | None = None
     """The RND configuration. Defaults to None, in which case RND is not used."""
 
@@ -345,6 +351,9 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
 
     algorithm: RslRlPpoAlgorithmCfg = MISSING
     """The algorithm configuration."""
+
+    torch_compile_mode: Literal["default", "max-autotune-no-cudagraphs"] | None = None
+    """The :func:`torch.compile` mode for actor and critic. Defaults to None (disabled)."""
 
     policy: RslRlPpoActorCriticCfg = MISSING
     """The policy configuration.

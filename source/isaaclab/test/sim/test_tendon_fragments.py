@@ -3,14 +3,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Launch Isaac Sim Simulator first."""
+from isaaclab.test.utils import launch_test_simulation
 
-from isaaclab.app import AppLauncher
-
-# launch omniverse app
-simulation_app = AppLauncher(headless=True).app
-
-"""Rest everything follows."""
+launch_test_simulation()
 
 import dataclasses
 import inspect
@@ -38,6 +33,13 @@ from isaaclab.sim.schemas import (
 from isaaclab.utils.string import to_camel_case
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def cleanup_simulation_context():
+    """Release the simulation context after each test."""
+    yield
+    SimulationContext.clear_instance()
 
 
 def _new_sim():

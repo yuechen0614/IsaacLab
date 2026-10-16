@@ -5,6 +5,7 @@
 
 import argparse
 import importlib.metadata
+import os
 import sys
 from pathlib import Path
 
@@ -27,9 +28,12 @@ from .commands.misc import (
     command_test,
 )
 from .utils import (
+    DEFAULT_ISAAC_SIM_PATH,
     ISAACLAB_ROOT,
+    is_isaac_sim_source_build,
     is_windows,
     run_python_command,
+    runs_isaac_sim_python,
 )
 
 _TASK_ENTRY_POINT_GROUP = "isaaclab.tasks"
@@ -41,8 +45,12 @@ def _exit_on_error(status: int) -> None:
         raise SystemExit(status)
 
 
-def _load_external_tasks() -> None:
-    """Import task packages registered by installed downstream projects."""
+def load_external_tasks() -> None:
+    """Import task packages registered by installed downstream projects.
+
+    Load the ``isaaclab.tasks`` entry points before looking up registered task IDs.
+    Entry points should reference modules so repeated discovery uses Python's import cache.
+    """
     for entry_point in importlib.metadata.entry_points(group=_TASK_ENTRY_POINT_GROUP):
         entry_point.load()
 
@@ -87,7 +95,7 @@ def leapp(args: list[str] | None = None) -> None:
 
         _exit_on_error(run_export_cli(command_args))
     else:
-        from isaaclab.cli.commands.deploy import command_deploy_leapp
+        from .commands.deploy import command_deploy_leapp
 
         _exit_on_error(command_deploy_leapp(command_args))
 
@@ -109,6 +117,28 @@ def random_agent(args: list[str] | None = None) -> None:
 def list_envs(args: list[str] | None = None) -> None:
     """List registered Isaac Lab environments."""
     command_list_envs(args)
+
+
+def demo(args: list[str] | None = None) -> None:
+    """List or run a packaged Isaac Lab demo.
+
+    Args:
+        args: Command-line arguments. Uses ``sys.argv`` when omitted.
+    """
+    from isaaclab.programs import DEMOS, run_program_cli
+
+    run_program_cli("demo", DEMOS, args)
+
+
+def example(args: list[str] | None = None) -> None:
+    """List or run a packaged Isaac Lab example.
+
+    Args:
+        args: Command-line arguments. Uses ``sys.argv`` when omitted.
+    """
+    from isaaclab.programs import EXAMPLES, run_program_cli
+
+    run_program_cli("example", EXAMPLES, args)
 
 
 def teleop(args: list[str] | None = None) -> None:
@@ -138,14 +168,14 @@ def benchmark(args: list[str] | None = None) -> None:
     Args:
         args: Command-line arguments. Uses sys.argv when omitted.
     """
-    from isaaclab.benchmark import run_benchmark_cli
+    from ..benchmark import run_benchmark_cli
 
     _exit_on_error(run_benchmark_cli(args))
 
 
 def microbenchmark(args: list[str] | None = None) -> None:
     """Run a component micro-benchmark with an exact physics variant."""
-    from isaaclab.benchmark import run_microbenchmark_cli
+    from ..benchmark import run_microbenchmark_cli
 
     _exit_on_error(run_microbenchmark_cli(args))
 
@@ -162,11 +192,33 @@ def cli() -> None:
         "zero_agent": zero_agent,
         "random_agent": random_agent,
     }
+    # uv selects the environment; local Kit builds still need their native runtime paths.
+    # Delegate before importing tasks or simulator libraries, and avoid wrapping the child twice.
+    runtime_commands = {*subcommands, "list_envs", "demo", "example", "teleop"}
+    configured_path = os.environ.get("ISAAC_PATH")
+    if (
+        len(sys.argv) > 1
+        and sys.argv[1] in runtime_commands
+        and (DEFAULT_ISAAC_SIM_PATH / ("python.bat" if os.name == "nt" else "python.sh")).is_file()
+        and (
+            is_isaac_sim_source_build(DEFAULT_ISAAC_SIM_PATH)
+            or runs_isaac_sim_python(DEFAULT_ISAAC_SIM_PATH, sys.executable, os.environ.get("VIRTUAL_ENV"))
+        )
+        and (configured_path is None or Path(configured_path).resolve() != DEFAULT_ISAAC_SIM_PATH.resolve())
+    ):
+        run_python_command("-m", ["isaaclab", *sys.argv[1:]], check=True)
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "list_envs":
         list_envs(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "demo":
+        demo(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "example":
+        example(sys.argv[2:])
+        return
     if len(sys.argv) > 1 and sys.argv[1] in subcommands:
-        _load_external_tasks()
+        load_external_tasks()
         subcommands[sys.argv[1]](sys.argv[2:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "teleop":
@@ -184,6 +236,8 @@ def cli() -> None:
             "  benchmark       Run a runtime, startup, training, or play benchmark\n"
             "                  (append _multigpu to a workflow to run it across GPUs)\n"
             "  microbenchmark  Run a component micro-benchmark\n"
+            "  demo            List or run packaged demonstrations\n"
+            "  example         List or run packaged standalone examples\n"
             "  leapp           Export or deploy a policy with LEAPP\n"
             "  list_envs       List registered environments and presets\n"
             "  train           Train an RL policy\n"
@@ -290,6 +344,11 @@ def cli() -> None:
         help="Build the documentation from source using sphinx.",
     )
     parser.add_argument(
+        "--docs_multi",
+        action="store_true",
+        help="Build the multi-version documentation from source using sphinx-multiversion.",
+    )
+    parser.add_argument(
         "-n",
         "--new",
         nargs=argparse.REMAINDER,
@@ -346,6 +405,9 @@ def cli() -> None:
 
     elif args.docs:
         command_build_docs()
+
+    elif args.docs_multi:
+        command_build_docs(multi_version=True)
 
     elif args.docker is not None:
         command_run_docker(args.docker)

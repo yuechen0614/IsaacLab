@@ -15,6 +15,9 @@ Camera data is expensive compared with low-dimensional state. Isaac Lab therefor
 camera copies from cloned environments into tiled render passes and exposes the de-tiled result as
 one device-resident buffer per requested output.
 
+For silent black or corrupted RTX camera images when scaling the workload, see
+:ref:`known-issues-rtx-buffer-limit`.
+
 Rendering model
 ---------------
 
@@ -40,12 +43,34 @@ when the renderer must be fixed:
      - Kit-less Warp rasterization through Newton
 
 For an environment that exposes renderer presets, select the renderer at launch instead of editing
-the scene configuration:
+the scene configuration. Pass ``physics=`` and ``renderer=`` together, since the renderer must match
+your setup path. The command below is for the kit-less Newton path; for Isaac Sim, use
+``physics=isaacsim_physx renderer=isaacsim_rtx`` with ``--extra isaacsim``. See
+:doc:`/source/how-to/configure_rendering` for each pairing:
 
-.. code-block:: bash
+.. tab-set::
+   :sync-group: os
 
-   uv run isaaclab train --rl_library rsl_rl \
-      --task Isaac-Cartpole-Camera-Direct renderer=newton_renderer
+   .. tab-item:: :icon:`fa-brands fa-linux` Linux
+      :sync: linux
+
+      .. code-block:: bash
+
+         uv run isaaclab train --rl_library rsl_rl \
+             --task Isaac-Cartpole-Camera-Direct \
+             physics=newton_mjwarp renderer=newton_renderer presets=rgb
+
+   .. tab-item:: :icon:`fa-brands fa-windows` Windows
+      :sync: windows
+
+      .. code-block:: batch
+
+         uv run isaaclab train --rl_library rsl_rl ^
+             --task Isaac-Cartpole-Camera-Direct ^
+             physics=newton_mjwarp renderer=newton_renderer presets=rgb
+
+Images are not written to disk by default. Set ``env.write_image_to_file=true`` to write
+``cartpole_<data_type>.png`` in the current working directory.
 
 See :doc:`/source/concepts/backends_and_presets` for preset discovery and
 :ref:`renderer-visual-comparison` for a same-scene comparison of the renderer outputs.
@@ -268,7 +293,9 @@ background. Set a normalized RGB tuple to use a solid color for pixels that miss
 
 .. code-block:: python
 
-   mask_camera = front_camera.replace(background_color=(0.0, 0.0, 0.0))
+   from isaaclab.utils import replace
+
+   mask_camera = replace(front_camera, background_color=(0.0, 0.0, 0.0))
 
 The setting is per camera. Cameras with renderer-default and solid backgrounds can coexist in one
 scene.
@@ -291,17 +318,12 @@ The field accepts:
 .. code-block:: python
 
    from isaaclab.sensors.camera import CameraCfg, CameraISPMode
+   from isaaclab.utils import replace
    from isaaclab_ppisp import PpispCfg
 
-   explicit_isp = front_camera.replace(
-       data_types=["rgb"],
-       isp_cfg=PpispCfg(inputs={"exposureOffset": 1.5}),
-   )
+   explicit_isp = replace(front_camera, data_types=["rgb"], isp_cfg=PpispCfg(inputs={"exposureOffset": 1.5}))
 
-   discovered_isp = front_camera.replace(
-       data_types=["rgb"],
-       isp_cfg=CameraISPMode.AUTO_CAMERA,
-   )
+   discovered_isp = replace(front_camera, data_types=["rgb"], isp_cfg=CameraISPMode.AUTO_CAMERA)
 
 ``AUTO_CAMERA`` checks the first matched camera prim. ``AUTO_ANY`` falls back to the first PPISP
 camera anywhere on the stage. Discovery happens once during camera construction.
@@ -320,12 +342,53 @@ configuration and discovered USD attributes are fixed for the camera lifetime.
    separately authored RTX exposure or tonemapping settings. When ``isp_cfg`` is ``None``, the
    renderer leaves authored camera exposure unchanged.
 
-Run ``scripts/demos/sensors/ppisp_camera.py`` for a complete PPISP workflow:
+Run the ``ppisp-camera`` example for a complete PPISP workflow. It supports
+``--renderer newton_renderer`` (Newton Warp, the default) and ``--renderer isaac_rtx`` (Isaac RTX).
+The example runs 0 warmup steps for Newton Warp and 32 for Isaac RTX before saving images; override
+this with ``--warmup_steps``.
 
-.. code-block:: bash
+.. tab-set::
+   :sync-group: os
 
-   uv run --extra isaacsim python scripts/demos/sensors/ppisp_camera.py \
-      --renderer newton_renderer --max_steps 60
+   .. tab-item:: :icon:`fa-brands fa-linux` Linux
+      :sync: linux
+
+      .. code-block:: bash
+
+         uv run --extra isaacsim isaaclab example ppisp-camera \
+             --renderer newton_renderer --max_steps 60
+
+         uv run --extra isaacsim isaaclab example ppisp-camera \
+             --input_scene /path/to/scene.usd --renderer isaac_rtx \
+             --camera_prim_path /usd/path/to/camera --max_steps 60
+
+   .. tab-item:: :icon:`fa-brands fa-windows` Windows
+      :sync: windows
+
+      .. code-block:: batch
+
+         uv run --extra isaacsim isaaclab example ppisp-camera ^
+             --renderer newton_renderer --max_steps 60
+
+         uv run --extra isaacsim isaaclab example ppisp-camera ^
+             --input_scene C:/path/to/scene.usd --renderer isaac_rtx ^
+             --camera_prim_path /usd/path/to/camera --max_steps 60
+
+``--input_scene`` accepts a local path or URL to a USD or USDZ scene containing the Gaussian PPISP
+setup. If omitted, the example uses the ``Samples/Scene_ParticleField/valiant_auto.usdz``
+sample from ``ISAAC_NUCLEUS_DIR``.
+
+``--camera_prim_path`` is an optional absolute USD prim path in the input scene; in both commands
+above, replace ``/usd/path/to/camera`` with the path of a camera in your scene. The prim must exist,
+have type ``Camera``, and carry ``ppisp:*`` attributes. If omitted, the example selects the first
+camera with PPISP attributes. For both renderers, the input scene must have a ``defaultPrim`` and
+the camera must be a descendant of it (for example, a camera at ``/World/Cameras/front_cam`` requires
+``/World`` as the ``defaultPrim``).
+
+Images are saved to ``output/ppisp_camera`` in the current working directory; use ``--output_dir``
+to change it. ``--max_steps`` sets the number of steps after warmup (default: 120), and
+``--save_interval`` sets the image-saving interval in steps (default: 20).
+For all options, run ``uv run --extra isaacsim isaaclab example ppisp-camera --help``.
 
 Performance and validation
 --------------------------
@@ -340,11 +403,11 @@ cost of the de-tiled outputs or downstream vision models. The camera follows the
 ``update_period`` contract; choose a period that matches the observation cadence instead of rendering
 at every physics step by default.
 
-A runnable camera example is available in ``scripts/demos/sensors/cameras.py``:
+A runnable camera example is available as ``camera``:
 
 .. code-block:: bash
 
-   uv run --extra isaacsim python scripts/demos/sensors/cameras.py
+   uv run --extra isaacsim isaaclab example camera
 
 For saving output to disk, see :doc:`/source/how-to/save_camera_output`. For renderer selection
 and customization, see :doc:`/source/how-to/configure_rendering`.

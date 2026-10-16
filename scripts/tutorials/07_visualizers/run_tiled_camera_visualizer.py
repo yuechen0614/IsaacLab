@@ -14,7 +14,7 @@ This script demonstrates the visualizer tiled camera panel.
 
     # Newton visualizer tiled camera panel
     uv run python scripts/tutorials/07_visualizers/run_tiled_camera_visualizer.py \
-        --task IsaacContrib-Stack-Cube-Galbot-Left-Arm-Gripper-Visuomotor --num_envs 25 --viz newton
+        --task IsaacContrib-Stack-Cube-Galbot-Left-Arm-Gripper-Visuomotor --num_envs 25 --viz newton_gl
 
 """
 
@@ -133,7 +133,7 @@ def _resolve_task(args_cli: argparse.Namespace) -> str:
 parser = argparse.ArgumentParser(description="Showcase the Kit/Newton visualizer tiled camera panel.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
-# append AppLauncher cli args
+# append simulation launcher cli args
 add_launcher_args(parser)
 args_cli, hydra_args = setup_preset_cli(parser)
 args_cli.task = _resolve_task(args_cli)

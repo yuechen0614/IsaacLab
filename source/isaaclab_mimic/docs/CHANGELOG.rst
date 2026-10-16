@@ -1,6 +1,49 @@
 Changelog
 ---------
 
+.. towncrier release notes start
+
+2.0.12 (2026-10-10)
+~~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed a segmentation fault in :class:`~isaaclab_mimic.motion_planners.curobo.curobo_planner.CuroboPlanner`
+  when initializing the static collision world on simulations running with ``--device cpu`` in scenes that
+  contain non-triangular meshes, such as the sorting bin in the adaptive bin cube stacking task. cuRobo's
+  quad-mesh triangulation launches its Warp kernel on Warp's default device while its arrays live on CUDA,
+  so stage parsing now runs under ``wp.ScopedDevice`` pinned to cuRobo's CUDA device.
+
+
+2.0.11 (2026-10-02)
+~~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Excluded the robot subtree from cuRobo world obstacles even when custom world ignore substrings were configured.
+
+
+2.0.10 (2026-09-28)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added ``--max_num_failures`` to the Mimic dataset generation script to bound unsuccessful generation attempts.
+* Added ``class_type`` to the environment configs that use a custom environment class, naming that class.
+
+
+2.0.9 (2026-09-27)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed cuRobo collision obstacle poses for robots away from the world origin.
+
+
 2.0.8 (2026-09-20)
 ~~~~~~~~~~~~~~~~~~
 

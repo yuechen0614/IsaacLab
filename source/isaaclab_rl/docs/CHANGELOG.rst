@@ -1,6 +1,136 @@
 Changelog
 ---------
 
+.. towncrier release notes start
+
+1.5.0 (2026-10-14)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added :attr:`~isaaclab_rl.rsl_rl.RslRlMLPModelCfg.GaussianDistributionCfg.std_range` to clamp the standard
+  deviation of RSL-RL Gaussian output distributions, exposing the existing ``std_range`` argument of RSL-RL.
+
+Fixed
+^^^^^
+
+* Fixed TorchRL wrapper stepping when its output device differs from the simulation device.
+* Updated RLInf configuration loading for compatibility with Hydra 1.4.
+
+
+1.4.0 (2026-10-13)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added ``--no-resume_optimizer_state`` to RSL-RL training to restore checkpoint models and iteration with a fresh policy optimizer. RND retained its separate optimizer state.
+
+Fixed
+^^^^^
+
+* Allowed a further Ctrl+C during environment shutdown to force process termination.
+* Loaded installed downstream task registrations in direct distributed workers before selecting the training backend.
+
+
+1.3.5 (2026-10-10)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed ``--checkpoint pretrained`` rejecting tasks that run on a Newton Kamino solver, such as
+  ``Isaac-Fourbar-Pole-Swingup``. Newton solvers are named after their config class, for example
+  ``newtonkaminopadmm``.
+* Fixed RLinf playback launched with ``uv run`` failing when Ray attempted to upload working directories larger
+  than 512 MiB. The upload is now disabled for both RLinf training and playback.
+
+
+1.3.4 (2026-10-06)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Applied task play-mode configuration during LEAPP exports so inference-only resources are initialized correctly.
+
+
+1.3.3 (2026-10-02)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Corrected zero-agent hold actions for absolute differential IK configured with a nonzero action offset.
+
+
+1.3.2 (2026-10-01)
+~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Computed the Stable-Baselines3 wrapper's done flags from the host copies of the termination and
+  truncation flags, saving one device-to-host transfer per step.
+
+Fixed
+^^^^^
+
+* Fixed multi-GPU training saving ``params/env.yaml`` and ``params/agent.yaml`` with the seed of
+  whichever rank wrote last, and leaving extra settings-only folders when ranks started in different
+  seconds. All ranks of a ``train_multigpu`` launch now shared one run folder: rank 0 wrote its settings,
+  videos, and sensor captures where a single-GPU run does, and every other rank wrote its own ``params/``,
+  videos, and sensor captures to ``rank_<rank>/``. For multi-node jobs on shared storage, pass the same
+  ``--run_timestamp`` to ``train_multigpu`` on every node.
+* Fixed skrl multi-GPU training saving the final checkpoint from every rank to the same file.
+* Fixed multi-GPU training ending with a ``destroy_process_group() was not called`` warning after a
+  successful run.
+* Fixed resumed RSL-RL multi-GPU training loading the checkpoint onto the GPU that saved it in every
+  process instead of the process's own GPU, which could make the first update fail with
+  ``normal expects all elements of std >= 0.0``.
+
+
+1.3.1 (2026-09-29)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed train/play entrypoints leaving environments open after setup failures or interrupts.
+  Cleanup closed the final environment wrapper and ignored further Ctrl+C presses during teardown.
+  Random/zero agents used the same cleanup and propagated interrupts instead of reporting success.
+
+
+1.3.0 (2026-09-28)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added ``use_mixed_precision`` to :class:`~isaaclab_rl.rsl_rl.RslRlPpoAlgorithmCfg` and
+  ``torch_compile_mode`` to :class:`~isaaclab_rl.rsl_rl.RslRlOnPolicyRunnerCfg` to configure RSL-RL's
+  bfloat16 policy update and ``torch.compile`` of the actor and critic. Both options remained disabled by default.
+  Set ``torch_compile_mode="default"`` (CLI: ``agent.torch_compile_mode=default``) to enable compilation.
+  Compilation added startup overhead and could change floating-point results and sampled training trajectories.
+
+Changed
+^^^^^^^
+
+* Used the shared indexed fill operation to reset recurrent policy state during RL-Games playback.
+* Enabled ``torch.backends.cudnn.benchmark`` in the RSL-RL training entrypoint, matching the existing
+  non-deterministic environment seeding behavior.
+
+
+1.2.1 (2026-09-27)
+~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Removed the redundant RL-Games action clone before out-of-place clipping.
+
+
 1.2.0 (2026-09-23)
 ~~~~~~~~~~~~~~~~~~
 
