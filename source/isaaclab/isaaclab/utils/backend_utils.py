@@ -80,6 +80,10 @@ class FactoryBase:
         if sim_context is None:
             return "newton"
 
+        # Explicit factory keys allow process proxies without replacing native backends.
+        backend = getattr(sim_context.physics_manager, "factory_backend", None)
+        if backend is not None:
+            return backend
         manager_name = sim_context.physics_manager.__name__.lower()
         if manager_name.startswith("newton"):
             return "newton"

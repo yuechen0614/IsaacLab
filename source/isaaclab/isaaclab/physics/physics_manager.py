@@ -87,6 +87,12 @@ class PhysicsManager(ABC):
     _callback_id: ClassVar[int] = 0
     views: ClassVar[dict[tuple[type, str], Any]] = {}
     clone_context_type: ClassVar[type[object] | None] = None
+    factory_backend: ClassVar[str | None] = None
+    """Optional explicit Factory key for registered external backend implementations.
+
+    None retains the built-in manager-name dispatch. Process backends can use a
+    separate key so local proxies never replace the worker's native asset classes.
+    """
 
     supports_anim_recording: ClassVar[bool] = False
     """Whether this backend can service ``--anim_recording_enabled`` (OVD Recorder).

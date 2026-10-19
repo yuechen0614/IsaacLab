@@ -44,6 +44,9 @@ class FrameView(FactoryBase, BaseFrameView):
         ctx = SimulationContext.instance()
         if ctx is None:
             return "physx"
+        backend = getattr(ctx.physics_manager, "factory_backend", None)
+        if backend is not None:
+            return backend
         manager_name = ctx.physics_manager.__name__.lower()
         if "newton" in manager_name:
             return "newton"
