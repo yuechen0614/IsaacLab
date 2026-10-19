@@ -468,10 +468,16 @@ class IsaacRtxRenderer(BaseRenderer):
                 if annotator_type == "semantic_segmentation":
                     init_params = {
                         "colorize": self.cfg.colorize_semantic_segmentation,
-                        "mapping": json.dumps(self.cfg.semantic_segmentation_mapping),
+                        "semanticFilter": _camera_semantic_filter_predicate(self.cfg.semantic_filter),
                     }
+                    # Replicator treats even serialized {} as a color mapping and forces RGBA.
+                    if self.cfg.colorize_semantic_segmentation and self.cfg.semantic_segmentation_mapping:
+                        init_params["mapping"] = json.dumps(self.cfg.semantic_segmentation_mapping)
                 elif annotator_type == "instance_segmentation":
-                    init_params = {"colorize": self.cfg.colorize_instance_segmentation}
+                    init_params = {
+                        "colorize": self.cfg.colorize_instance_segmentation,
+                        "semanticFilter": _camera_semantic_filter_predicate(self.cfg.semantic_filter),
+                    }
                 elif annotator_type == "instance_id_segmentation_fast":
                     init_params = {"colorize": self.cfg.colorize_instance_id_segmentation}
 

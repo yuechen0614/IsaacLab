@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from contextlib import nullcontext
@@ -86,15 +87,16 @@ def test_native_fabric_geometry_needs_no_separate_publication(monkeypatch):
     provider.get_geometry_points.assert_not_called()
 
 
-def test_create_render_data_uses_unique_sdf_safe_render_product_name(monkeypatch):
-    """Live and same-stage cameras stay distinct; closed-stage slots can be reused."""
+@pytest.fixture
+def render_data_setup(monkeypatch):
+    """Run the renderer boundary with recorded Replicator calls and no Kit app."""
     replicator_core_module, syntheticdata_module = _install_omni_stubs(monkeypatch)
     monkeypatch.setattr(syntheticdata_module, "SyntheticData", MagicMock(), raising=False)
 
     import isaaclab_physx.renderers.isaac_rtx_renderer as rtx_renderer
     from isaaclab_physx.renderers.isaac_rtx_renderer_cfg import IsaacRtxRendererCfg
 
-    from pxr import Sdf, UsdGeom
+    from pxr import UsdGeom
 
     import isaaclab.sim.utils.stage as stage_utils
 
@@ -107,18 +109,14 @@ def test_create_render_data_uses_unique_sdf_safe_render_product_name(monkeypatch
     # Pass the Camera prim check that gates render-product creation.
     stage.GetPrimAtPath.return_value.IsA.side_effect = lambda typ: typ is UsdGeom.Camera
 
-    # Capture the ``name=`` kwarg passed to Replicator; the returned HydraTexture
-    # and annotator registry only need to exist so create_render_data can finish.
     rp = MagicMock()
     rp.path = "/Render/rp_test"
     create_tiled = MagicMock(return_value=rp)
-    annotator = MagicMock()
     registry = MagicMock()
-    registry.get_annotator.return_value = annotator
+    registry.get_annotator.side_effect = lambda *_args, **_kwargs: MagicMock()
     replicator_core_module.create = SimpleNamespace(render_product_tiled=create_tiled)
     replicator_core_module.AnnotatorRegistry = registry
 
-    # Minimal CameraRenderSpec: one rgb tiled camera is enough to exercise naming.
     spec = SimpleNamespace(
         camera_prim_paths=["/World/envs/env_0/Camera"],
         device="cpu",
@@ -135,12 +133,38 @@ def test_create_render_data_uses_unique_sdf_safe_render_product_name(monkeypatch
     renderer = rtx_renderer.IsaacRtxRenderer.__new__(rtx_renderer.IsaacRtxRenderer)
     renderer.cfg = IsaacRtxRendererCfg()
 
+    monkeypatch.setattr(rtx_renderer, "_RELEASED_RENDER_PRODUCT_NAMES", {})
+    monkeypatch.setattr(rtx_renderer, "get_settings_manager", lambda: settings)
+    monkeypatch.setattr(rtx_renderer, "get_isaac_sim_version", lambda: version.parse("6.2"))
+    monkeypatch.setattr(stage_utils, "get_current_stage", lambda **_kwargs: stage)
+    return SimpleNamespace(
+        module=rtx_renderer,
+        renderer=renderer,
+        spec=spec,
+        settings=settings,
+        stage=stage,
+        stage_utils=stage_utils,
+        render_product=rp,
+        create_tiled=create_tiled,
+        registry=registry,
+    )
+
+
+def test_create_render_data_uses_unique_sdf_safe_render_product_name(render_data_setup):
+    """Live and same-stage cameras stay distinct; closed-stage slots can be reused."""
+    from pxr import Sdf, UsdGeom
+
+    setup = render_data_setup
+    rtx_renderer, stage_utils = setup.module, setup.stage_utils
+    renderer, spec = setup.renderer, setup.spec
+    settings, stage = setup.settings, setup.stage
+    rp, create_tiled = setup.render_product, setup.create_tiled
+
     # Create many products with the same spec: names must still all differ (the
     # sequential simple_shading_* / multi-camera collision case this fix targets).
     num_names = 256
     names: list[str] = []
     created = []
-    monkeypatch.setattr(rtx_renderer, "_RELEASED_RENDER_PRODUCT_NAMES", {})
     with (
         patch.object(rtx_renderer, "get_settings_manager", return_value=settings),
         patch.object(rtx_renderer, "get_isaac_sim_version", return_value=version.parse("6.0")),
@@ -191,6 +215,61 @@ def test_create_render_data_uses_unique_sdf_safe_render_product_name(monkeypatch
         with patch.object(stage_utils, "get_current_stage", return_value=new_stage):
             renderer.create_render_data(spec)
             assert create_tiled.call_args.kwargs["name"] != names[1]
+
+
+@pytest.mark.parametrize(
+    ("colorize", "mapping", "semantic_filter", "expected_filter", "expected_mapping"),
+    [
+        pytest.param(False, {}, "class:apple", "class:apple", None, id="raw-ids-empty-mapping"),
+        pytest.param(
+            False, {"class:apple": (1, 2, 3, 255)}, ["class"], "class:*", None, id="raw-ids-ignore-color-mapping"
+        ),
+        pytest.param(True, {}, ["class", "prim"], "class:*; prim:*", None, id="default-colors-type-list"),
+        pytest.param(
+            True,
+            {"class:apple": (1, 2, 3, 255)},
+            "class:apple",
+            "class:apple",
+            {"class:apple": [1, 2, 3, 255]},
+            id="custom-colors-predicate",
+        ),
+    ],
+)
+def test_segmentation_passes_filter_and_colorization_to_replicator(
+    render_data_setup, colorize, mapping, semantic_filter, expected_filter, expected_mapping
+):
+    """Replicator needs a product filter; an empty mapping must not force packed RGBA over raw IDs."""
+    setup = render_data_setup
+    setup.spec.cfg.data_types = ["semantic_segmentation", "instance_segmentation", "instance_id_segmentation_fast"]
+    setup.renderer.cfg.semantic_filter = semantic_filter
+    setup.renderer.cfg.colorize_semantic_segmentation = colorize
+    setup.renderer.cfg.colorize_instance_segmentation = not colorize
+    setup.renderer.cfg.colorize_instance_id_segmentation = colorize
+    setup.renderer.cfg.semantic_segmentation_mapping = mapping
+
+    render_data = setup.renderer.create_render_data(setup.spec)
+
+    requests = {}
+    for request in setup.registry.get_annotator.call_args_list:
+        name = request.args[0]
+        assert name not in requests
+        params = request.args[1] if len(request.args) > 1 else request.kwargs["init_params"]
+        requests[name] = params
+    semantic = requests["semantic_segmentation"]
+    if expected_mapping is None:
+        # Even serialized {} is truthy to Replicator and selects its RGBA-mapping path.
+        assert "mapping" not in semantic
+    else:
+        assert json.loads(semantic["mapping"]) == expected_mapping
+    assert semantic["colorize"] is colorize
+    assert semantic["semanticFilter"] == expected_filter
+    assert requests["instance_segmentation_fast"] == {
+        "colorize": not colorize,
+        "semanticFilter": expected_filter,
+    }
+    assert requests["instance_id_segmentation_fast"] == {"colorize": colorize}
+    for annotator in render_data.annotators.values():
+        annotator.attach.assert_called_once_with([setup.render_product.path])
 
 
 @pytest.mark.parametrize(
