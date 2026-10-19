@@ -150,18 +150,31 @@ def build_source_builders(
     """
     builders = {}
     sources = tuple(dict.fromkeys(sources))
+    # Share exact geometry/settings only during this source-import operation.
+    decomposition_cache = {} if not skip_mesh_approximation and len(sources) > 1 else None
     for source in sources:
         builder = create_builder()
-        import_result = builder.add_usd(
-            stage,
-            root_path=source,
-            load_visual_shapes=load_visual_shapes,
-            hide_collision_shapes=True,
-            skip_mesh_approximation=skip_mesh_approximation,
-            schema_resolvers=schema_resolvers,
-            ignore_paths=ignore_paths or (),
-            return_deformable_results=True,
-        )
+        if decomposition_cache is not None and not hasattr(builder, "mesh_decomposition_cache"):
+            raise RuntimeError(
+                "Multi-source Newton import requires the reviewed mesh decomposition cache fix. "
+                "Apply scripts/patch_newton.py with the runtime Python."
+            )
+        if decomposition_cache is not None:
+            builder.mesh_decomposition_cache = decomposition_cache
+        try:
+            import_result = builder.add_usd(
+                stage,
+                root_path=source,
+                load_visual_shapes=load_visual_shapes,
+                hide_collision_shapes=True,
+                skip_mesh_approximation=skip_mesh_approximation,
+                schema_resolvers=schema_resolvers,
+                ignore_paths=ignore_paths or (),
+                return_deformable_results=True,
+            )
+        finally:
+            if decomposition_cache is not None:
+                builder.mesh_decomposition_cache = None
         _restore_visible_colliders_without_visual_shapes(
             builder, stage, import_result["path_shape_map"], load_visual_shapes
         )

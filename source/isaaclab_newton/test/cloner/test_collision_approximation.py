@@ -5,7 +5,9 @@
 
 """Unit tests: the Newton cloner honors USD-authored ``physics:approximation``."""
 
+import coacd
 import newton
+import numpy as np
 import pytest
 from isaaclab_newton.cloner.newton_clone_utils import build_source_builders
 from newton import GeoType, ShapeFlags
@@ -269,3 +271,38 @@ def test_generated_mesh_uses_source_omnipbr_tint_and_material_binding():
     assert builder.shape_color[visual] == pytest.approx((expected,) * 3)
     assert builder.custom_attributes["isaaclab:visual_material_path"].values[visual] == "/Looks/Table"
     assert stage.GetRootLayer().ExportToString() == before
+
+
+def test_multi_source_import_reuses_decomposition_only_within_its_scope(monkeypatch):
+    """Independent CoACD calls cannot give identical sources incompatible topology."""
+    stage, sources = _make_two_source_stage("convexDecomposition", "convexDecomposition")
+    UsdGeom.Xformable(stage.GetPrimAtPath(sources[1])).AddTranslateOp().Set(Gf.Vec3d(7, 0, 0))
+    UsdGeom.Xformable(stage.GetPrimAtPath(sources[1])).AddScaleOp().Set(Gf.Vec3f(2, 3, 4))
+    for source in sources:
+        material = UsdShade.Material.Define(stage, f"{source}/material")
+        UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(source)).Bind(material)
+    vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64)
+    faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int32)
+    calls = 0
+
+    def unstable_decomposition(mesh, **settings):
+        nonlocal calls
+        calls += 1
+        return [(vertices.copy(), faces.copy()) for _ in range(calls)]
+
+    monkeypatch.setattr(coacd, "run_coacd", unstable_decomposition)
+    before = stage.GetRootLayer().ExportToString()
+    for expected_hulls in (1, 2):
+        builders = _build_sources(stage, sources)
+        left, right = (builders[source] for source in sources)
+        assert len(_collision_shapes(left)) == len(_collision_shapes(right)) == expected_hulls
+        assert calls == expected_hulls
+        for source, builder in builders.items():
+            assert builder.mesh_decomposition_cache is None
+            visual = builder.shape_label.index(f"{source}/geom_visual")
+            assert builder.custom_attributes["isaaclab:visual_material_path"].values[visual] == f"{source}/material"
+        np.testing.assert_allclose(np.asarray(right.body_q[0])[:3], [7, 0, 0])
+        for index, flags in enumerate(right.shape_flags):
+            if flags & ShapeFlags.COLLIDE_SHAPES:
+                np.testing.assert_array_equal(right.shape_scale[index], [2, 3, 4])
+        assert stage.GetRootLayer().ExportToString() == before
