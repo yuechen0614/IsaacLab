@@ -371,6 +371,8 @@ class OvPhysxManager(PhysicsManager):
     """Native runtime borrowed from the simulation registry after warmup; the registry owns its lifetime."""
     _stage_usda: ClassVar[str | None] = None
     _warmup_done: ClassVar[bool] = False
+    _binding_token: ClassVar[object | None] = None
+    _stop_cleanup_pending: ClassVar[bool] = False
     _next_control_ordinal: ClassVar[int] = 2
     _requires_full_stage: ClassVar[bool] = False
     # Device mode is process-wide; later contexts must reuse the first selected device.
@@ -384,6 +386,31 @@ class OvPhysxManager(PhysicsManager):
     # in :meth:`initialize` and refreshed by :meth:`set_gravity`. ``cfg.gravity`` stays the nominal
     # value that randomization terms resample from, so live updates must not be written back to it.
     _gravity: ClassVar[tuple[float, float, float] | None] = None
+
+    @classmethod
+    def is_initialized(cls) -> bool:
+        """Return whether consumers may bind to the current, running stage.
+
+        Native runtime allocation alone does not establish readiness. STOP,
+        re-warm, failed initialization, and close invalidate consumer bindings.
+        """
+        return (
+            cls._binding_token is not None
+            and cls._warmup_done
+            and cls.backend is not None
+            and cls.backend.physx is not None
+            and cls.backend.stage is not None
+        )
+
+    @classmethod
+    def get_binding_token(cls) -> object | None:
+        """Return the opaque binding generation, or ``None`` while unavailable.
+
+        Compare by identity. The token changes after STOP followed by a non-soft
+        reset, and whenever OVStage is replaced, even if the native PhysX
+        instance is reused. It does not own or retain a native resource.
+        """
+        return cls._binding_token if cls.is_initialized() else None
 
     @classmethod
     def get_dt(cls) -> float:
@@ -481,6 +508,8 @@ class OvPhysxManager(PhysicsManager):
         The simulation registry retains its native resource across reinitialization.
         ``cls._locked_device`` carries the process-wide first-device policy.
         """
+        cls._binding_token = None
+        cls._stop_cleanup_pending = False
         super().initialize(sim_context)
         cls._ensure_physx_schemas_registered()
         cls._gravity = tuple(sim_context.cfg.gravity)
@@ -511,13 +540,28 @@ class OvPhysxManager(PhysicsManager):
 
         A forced re-warm dispatches :attr:`~isaaclab.physics.PhysicsEvent.STOP`
         before replacing the attached stage so listeners discard stale bindings.
+        A non-soft reset after STOP reuses the warmed native stage and publishes
+        a new binding generation. Soft reset never restores stopped bindings.
         """
         if not soft:
-            if not cls._warmup_done:
-                if cls.backend is not None and cls.backend.stage is not None:
-                    cls.dispatch_event(PhysicsEvent.STOP, payload={})
-                cls._warmup_and_load()
-            cls.dispatch_event(PhysicsEvent.PHYSICS_READY, payload={})
+            try:
+                if cls._stop_cleanup_pending:
+                    cls.stop()
+                if not cls._warmup_done:
+                    if cls.backend is not None and cls.backend.stage is not None:
+                        cls.stop()
+                    cls._warmup_and_load()
+                elif cls._binding_token is None:
+                    # STOP preserves the native stage, but every consumer must
+                    # acquire a new binding generation before resuming.
+                    cls._binding_token = object()
+                cls.dispatch_event(PhysicsEvent.PHYSICS_READY, payload={})
+            except Exception as error:
+                try:
+                    cls.stop()
+                except Exception as cleanup_error:
+                    error.add_note(f"OVPhysX binding cleanup failed: {cleanup_error}")
+                raise
         cls.kinematics_dirty = True
         cls._scene_data_backend.transforms_timestamp += 1
         cls._scene_data_backend.geometry_timestamp += 1
@@ -566,8 +610,20 @@ class OvPhysxManager(PhysicsManager):
         warmup()
 
     @classmethod
+    def stop(cls) -> None:
+        """Invalidate consumer bindings without destroying the native runtime."""
+        cls._binding_token = None
+        cls._stop_cleanup_pending = True
+        errors = cls._dispatch_event_collect_errors(PhysicsEvent.STOP, payload={})
+        cls._stop_cleanup_pending = bool(errors)
+        if errors:
+            details = "; ".join(str(error) for error in errors)
+            raise RuntimeError(f"{len(errors)} OVPhysX STOP callback(s) failed: {details}") from errors[0]
+
+    @classmethod
     def close(cls) -> None:
         """Release ovphysx resources and clean up."""
+        cls._binding_token = None
         sim = SimulationContext.instance()
         # Dispatch STOP while the runtime is still live. Asset and sensor callbacks
         # invalidate raw native handles before the view registry drains the remaining
@@ -582,6 +638,7 @@ class OvPhysxManager(PhysicsManager):
             finally:
                 cls._stage_usda = None
                 cls._warmup_done = False
+                cls._stop_cleanup_pending = False
                 cls._requires_full_stage = False
                 cls._clone_recipes = []
                 # Drop the SceneDataBackend singleton: its cached bindings and buffers
@@ -621,6 +678,8 @@ class OvPhysxManager(PhysicsManager):
     @classmethod
     def _prepare_physx_for_stage_reuse(cls) -> None:
         """Drain stage-bound handles before reusing the active runtime for another stage."""
+        cls._binding_token = None
+        cls._warmup_done = False
         physx = cls.backend.physx
         if physx is None:
             return
@@ -743,6 +802,8 @@ class OvPhysxManager(PhysicsManager):
                 IsaacLab applies the same conservative policy in both
                 directions for a predictable lifecycle.
         """
+        cls._binding_token = None
+        cls._warmup_done = False
         sim = PhysicsManager._sim
         if sim is None:
             raise RuntimeError("OvPhysxManager: SimulationContext is not set.")
@@ -805,6 +866,7 @@ class OvPhysxManager(PhysicsManager):
 
         cls.dispatch_event(PhysicsEvent.MODEL_INIT, payload={})
         cls._warmup_done = True
+        cls._binding_token = object()
 
     @classmethod
     def _close_at_exit(cls) -> None:

@@ -62,6 +62,8 @@ def manager_module(monkeypatch):
         "_stage_usda": None,
         "_next_control_ordinal": 2,
         "_warmup_done": False,
+        "_binding_token": None,
+        "_stop_cleanup_pending": False,
         "_requires_full_stage": False,
         "_locked_device": None,
         "_clone_recipes": [],
@@ -559,3 +561,205 @@ def test_default_cache_dir_rejects_a_directory_owned_by_another_user(manager_mod
 
     with pytest.raises(RuntimeError, match="owned"):
         manager_module._prepare_default_cache_dir(str(target))
+
+
+@pytest.fixture
+def binding_lifecycle(monkeypatch, manager_module):
+    """Exercise manager lifecycle with only native serialization/warmup replaced."""
+    from isaaclab_ov.physics import OvPhysxCfg
+
+    from pxr import Usd
+
+    from isaaclab.physics import PhysicsEvent, PhysicsManager
+
+    manager = manager_module.OvPhysxManager
+    sim = PhysicsManager._sim
+    sim.stage = Usd.Stage.CreateInMemory()
+    sim.cfg = SimpleNamespace(physics=OvPhysxCfg(), physics_prim_path="/World/physicsScene")
+    sim.get_clone_plan = lambda: None
+    monkeypatch.setattr(PhysicsManager, "_device", "cpu")
+    monkeypatch.setattr(PhysicsManager, "_cfg", sim.cfg.physics)
+    monkeypatch.setattr(manager, "_callbacks", {})
+    monkeypatch.setattr(manager_module, "_serialize_stage", lambda *args: ("fixture", []))
+    monkeypatch.setattr(manager_module.OvPhysxView, "_close_all_for", lambda physx: None)
+    backend = manager.backend
+    native = backend.physx
+    native.reset_stage = lambda: object()
+    native.wait_op = lambda operation: None
+    events = []
+    stages = []
+
+    def attach(stage_usda):
+        assert not manager.is_initialized()
+        assert manager.get_binding_token() is None
+        stage = SimpleNamespace(destroy=lambda: events.append("destroy_stage"))
+        stages.append(stage)
+        backend.stage = stage
+
+    def warmup(physx):
+        assert physx is native
+        assert not manager.is_initialized()
+        events.append("warmup")
+
+    def release():
+        assert not manager.is_initialized()
+        events.append("release")
+        backend.physx = None
+        backend.stage = None
+
+    monkeypatch.setattr(manager, "_attach_ovstage", attach)
+    monkeypatch.setattr(manager, "_warmup_physx", warmup)
+    monkeypatch.setattr(backend, "close", release)
+    manager.register_callback(lambda event: events.append(("stop", manager.get_binding_token())), PhysicsEvent.STOP)
+    manager.register_callback(
+        lambda event: events.append(("ready", manager.get_binding_token())), PhysicsEvent.PHYSICS_READY
+    )
+    return manager, native, stages, events
+
+
+def test_binding_token_tracks_stop_reset_and_same_native_stage_replacement(binding_lifecycle):
+    manager, native, stages, events = binding_lifecycle
+    assert not manager.is_initialized()
+    assert manager.get_binding_token() is None
+    manager.reset()
+    first = manager.get_binding_token()
+    assert first is not None and manager.is_initialized()
+    manager.reset(soft=True)
+    manager.reset()
+    assert manager.get_binding_token() is first
+    assert len(stages) == 1
+
+    manager.stop()
+    assert manager.get_binding_token() is None
+    assert not manager.is_initialized()
+    assert events[-1] == ("stop", None)
+    manager.reset(soft=True)
+    assert manager.get_binding_token() is None
+    manager.reset()
+    resumed = manager.get_binding_token()
+    assert resumed is not None and resumed is not first
+    assert manager.get_physx_instance() is native
+    assert len(stages) == 1
+
+    # SDK forced re-warm replaces OVStage while the registry keeps native PhysX.
+    manager._warmup_done = False
+    manager.reset()
+    rebuilt = manager.get_binding_token()
+    assert rebuilt is not None and rebuilt is not resumed
+    assert manager.get_physx_instance() is native
+    assert len(stages) == 2 and stages[0] is not stages[1]
+    assert events.count(("stop", None)) == 2
+    assert events[-1] == ("ready", rebuilt)
+    manager.close()
+    assert manager.get_binding_token() is None
+    assert not manager.is_initialized()
+    assert events[-2:] == [("stop", None), "release"]
+
+
+def test_failed_rewarm_leaves_no_binding_token_and_can_retry(monkeypatch, binding_lifecycle):
+    manager, native, stages, events = binding_lifecycle
+    manager.reset()
+    first = manager.get_binding_token()
+    manager._warmup_done = False
+    warmup = manager._warmup_physx
+
+    def fail(physx):
+        assert manager.get_binding_token() is None
+        raise ValueError("native warmup failed")
+
+    monkeypatch.setattr(manager, "_warmup_physx", fail)
+    with pytest.raises(ValueError, match="native warmup failed"):
+        manager.reset()
+    assert manager.get_binding_token() is None
+    assert not manager.is_initialized()
+    monkeypatch.setattr(manager, "_warmup_physx", warmup)
+    manager.reset()
+    assert manager.get_binding_token() is not first
+    assert manager.is_initialized()
+    assert manager.get_physx_instance() is native
+    manager.close()
+
+
+def test_ready_failure_invalidates_all_consumers_without_masking_error(binding_lifecycle):
+    from isaaclab.physics import PhysicsEvent
+
+    manager, native, stages, events = binding_lifecycle
+    primary = ValueError("asset init failed")
+
+    def fail_ready(event):
+        assert manager.is_initialized()
+        raise primary
+
+    def fail_stop(event):
+        assert not manager.is_initialized()
+        raise RuntimeError("asset release failed")
+
+    manager.register_callback(fail_ready, PhysicsEvent.PHYSICS_READY, order=1)
+    stop_handle = manager.register_callback(fail_stop, PhysicsEvent.STOP, order=-1)
+    with pytest.raises(ValueError) as caught:
+        manager.reset()
+    assert caught.value is primary
+    assert manager.get_binding_token() is None
+    assert not manager.is_initialized()
+    assert events[-1] == ("stop", None), "A failed STOP listener must not skip later consumers"
+    assert any("asset release failed" in note for note in primary.__notes__)
+    stop_handle.deregister()
+    manager.close()
+
+
+@pytest.mark.parametrize("asset_name", ["RigidObject", "Articulation"])
+def test_asset_stop_closes_its_view_and_preserves_failed_owner_for_retry(asset_name):
+    from isaaclab_ov import assets
+
+    asset_type = getattr(assets, asset_name)
+    asset = object.__new__(asset_type)
+    asset._is_initialized = True
+    asset._clear_selector_cache = lambda: None
+    asset._clear_debug_vis_handle = lambda: None
+    asset._clear_callbacks = lambda: None
+    attempts = []
+    failure = ValueError("view cleanup failed")
+
+    def close_view():
+        attempts.append("close")
+        if len(attempts) == 1:
+            raise failure
+
+    view = SimpleNamespace(close=close_view)
+    asset._root_view = view
+    with pytest.raises(ValueError) as caught:
+        asset._invalidate_initialize_callback(None)
+    assert caught.value is failure
+    assert not asset.is_initialized
+    assert asset._root_view is view, "Retain a failed view so later cleanup can retry"
+    asset._invalidate_initialize_callback(None)
+    assert asset._root_view is None
+    assert attempts == ["close", "close"]
+    asset._invalidate_initialize_callback(None)
+    assert attempts == ["close", "close"]
+
+
+def test_reset_retries_failed_stop_before_publishing_ready(binding_lifecycle):
+    from isaaclab.physics import PhysicsEvent
+
+    manager, native, stages, events = binding_lifecycle
+    manager.reset()
+    blocked = [True]
+
+    def release_view(event):
+        if blocked[0]:
+            raise ValueError("retained view must be cleaned")
+
+    manager.register_callback(release_view, PhysicsEvent.STOP)
+    with pytest.raises(RuntimeError, match="retained view"):
+        manager.stop()
+    ready_count = sum(isinstance(event, tuple) and event[0] == "ready" for event in events)
+    with pytest.raises(RuntimeError, match="retained view"):
+        manager.reset()
+    assert manager.get_binding_token() is None
+    assert sum(isinstance(event, tuple) and event[0] == "ready" for event in events) == ready_count
+    blocked[0] = False
+    manager.reset()
+    assert manager.is_initialized()
+    assert manager.get_physx_instance() is native
+    manager.close()
