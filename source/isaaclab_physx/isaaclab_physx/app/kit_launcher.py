@@ -468,6 +468,11 @@ class KitLauncher(SimulationLauncher):
         # Remove all values from input keyword args which are not meant for SimulationApp
         # Assign all the passed settings to a dictionary for the simulation app
         self._sim_app_config = {key: launcher_args[key] for key in _SIM_APP_CONFIG_KEYS & launcher_args.keys()}
+        # Headless Kit still creates an updating default viewport. Keep it for
+        # visualizers, recording, streaming and XR; sensor render products are independent.
+        self._sim_app_config["disable_viewport_updates"] = self._headless and not (
+            self._render_viewport or self._kit_visualizer or self._xr
+        )
 
     def _resolve_livestream_settings(self, launcher_args: dict):
         """Resolve livestream related settings."""

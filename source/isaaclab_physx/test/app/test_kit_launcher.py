@@ -586,6 +586,39 @@ def test_limit_cpu_threads_forwarded_to_simulation_app(monkeypatch: pytest.Monke
     assert launcher._sim_app_config["limit_cpu_threads"] == 1
 
 
+@pytest.mark.parametrize(
+    ("output_args", "disable_viewport"),
+    [
+        pytest.param({"headless": True, "enable_cameras": True}, True, id="offscreen-cameras"),
+        pytest.param({}, True, id="implicit-headless"),
+        pytest.param({"kit_visualizer": True}, False, id="gui"),
+        pytest.param({"headless": True, "kit_visualizer": True}, False, id="headless-kit-visualizer"),
+        pytest.param({"headless": True, "video": True}, False, id="video"),
+        pytest.param({"livestream": 1}, False, id="livestream"),
+        pytest.param({"headless": True, "xr": True}, False, id="xr"),
+    ],
+)
+def test_default_viewport_updates_follow_output_intent(output_args, disable_viewport, monkeypatch):
+    """The SimulationApp config disables only the unused headless viewport, not sensor rendering."""
+    for name in ("HEADLESS", "LIVESTREAM", "XR"):
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setattr(sys, "argv", ["script.py"])
+    original_find_spec = kit_launcher_module.importlib.util.find_spec
+    monkeypatch.setattr(
+        kit_launcher_module.importlib.util,
+        "find_spec",
+        lambda name: object() if name in ("moviepy", "imageio_ffmpeg") else original_find_spec(name),
+    )
+    launcher = KitLauncher.__new__(KitLauncher)
+    monkeypatch.setattr(launcher, "_resolve_experience_file", lambda _launcher_args: None)
+
+    launcher._config_resolution({"device": "cpu", **output_args})
+
+    assert launcher._sim_app_config.get("disable_viewport_updates", False) is disable_viewport
+    if output_args.get("enable_cameras"):
+        assert launcher._enable_cameras and launcher._offscreen_render
+
+
 class _DummySettings:
     def __init__(self):
         self.values = {}
