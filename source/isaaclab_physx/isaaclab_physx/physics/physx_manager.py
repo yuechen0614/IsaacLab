@@ -218,6 +218,49 @@ class PhysxSceneDataBackend(SceneDataBackend):
         """Return the native body selection bound during initialization."""
         return self._rigid_body_view
 
+    def refresh_rigid_body_view(self, stage: Usd.Stage) -> None:
+        """Rebind native pose publication after flushed rigid-body topology changes.
+
+        Call at a scene-consumer rebuild boundary, after PhysX has loaded the
+        stage changes. Existing renderer mappings and borrowed arrays must be
+        released and rebound by their owners. This does not reset physics,
+        recreate per-asset views, or change deformable geometry publication.
+
+        Args:
+            stage: The USD stage owned by the active physics simulation.
+
+        Raises:
+            RuntimeError: The physics backend has not been initialized.
+        """
+        if self.backend is None:
+            raise RuntimeError("Initialize PhysX before refreshing scene rigid-body publication.")
+        native = self.backend.simulation_view
+        view = None
+        # Empty selections log native errors; skip entirely static scenes.
+        prims = Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies())
+        if any(prim.HasAPI(UsdPhysics.RigidBodyAPI) for prim in prims):
+            candidate = native.create_rigid_body_view("/**")
+            if candidate._backend is not None:
+                paths = candidate.prim_paths
+                articulation_type = omni.physics.tensors.ObjectType.Articulation
+                roots = [path for path in paths if native.get_object_type(path) == articulation_type]
+                if roots:
+                    articulations = native.create_articulation_view(roots)
+                    links = (body_paths[0] for body_paths in articulations.link_paths)
+                    aliases = dict(zip(articulations.prim_paths, links, strict=True))
+                    candidate = native.create_rigid_body_view([aliases.get(path, path) for path in paths])
+                    if candidate._backend is None:
+                        raise RuntimeError("Could not bind PhysX articulation root-link publication.")
+                view = candidate
+        # Publish only after successful selection. Invalidate cached arrays even
+        # for an empty or same-size replacement; old native pointers are retired.
+        self._rigid_body_view = view
+        self._transforms.data.transforms = None
+        self.transforms_timestamp += 1
+        self._fabric_selection = None
+        self._fabric_transforms = SceneDataFormat.FabricMatrix44()
+        self._fabric_timestamp = -1
+
     def _setup_deformable_geometry(self, entries: Sequence[DeformableStageEntry]) -> None:
         """Bind exact visual mesh paths directly to padded native nodal buffers."""
         bindings = []
@@ -1046,25 +1089,7 @@ class PhysxManager(PhysicsManager):
         # Register the complete tensor view only after PhysX has loaded the stage.
         cls.backend = sim.get_or_create_backend(PhysxBackendCfg(stage_id=stage_id, device=sim.device))
         cls._scene_data_backend.backend = cls.backend
-        # omni.physics.tensors logs errors for an empty selection, so static scenes skip the request.
-        prims = Usd.PrimRange.Stage(sim.stage, Usd.TraverseInstanceProxies())
-        if any(prim.HasAPI(UsdPhysics.RigidBodyAPI) for prim in prims):
-            view = cls.backend.simulation_view.create_rigid_body_view("/**")
-            # PhysX returns a wrapper with no native handle for an empty selection.
-            cls._scene_data_backend._rigid_body_view = view if view._backend is not None else None
-            if view._backend is not None:
-                # Wildcard bindings expose articulation aliases; publish the actual root-link paths.
-                native = cls.backend.simulation_view
-                paths = view.prim_paths
-                articulation_type = omni.physics.tensors.ObjectType.Articulation
-                roots = [path for path in paths if native.get_object_type(path) == articulation_type]
-                if roots:
-                    articulations = native.create_articulation_view(roots)
-                    links = (body_paths[0] for body_paths in articulations.link_paths)
-                    aliases = dict(zip(articulations.prim_paths, links, strict=True))
-                    cls._scene_data_backend._rigid_body_view = native.create_rigid_body_view(
-                        [aliases.get(path, path) for path in paths]
-                    )
+        cls._scene_data_backend.refresh_rigid_body_view(sim.stage)
 
         # Final update after view creation
         physx.update_simulation(cls.get_physics_dt(), 0.0)

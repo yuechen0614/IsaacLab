@@ -245,3 +245,89 @@ def test_deformable_geometry_uses_declared_counts_and_native_order(monkeypatch, 
         backend.get_geometry_batches()
     with pytest.raises(RuntimeError, match="ClonePlan"):
         _ = backend.native_geometry_formats
+
+
+def test_rigid_publication_rebinds_late_and_replaced_bodies_without_stale_arrays(monkeypatch):
+    """New SDP mappings see flushed bodies, root-link paths, and empty replacements."""
+    from isaaclab_physx.physics import physx_manager
+
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    from isaaclab.scene_data import SceneDataFormat, SceneDataProvider
+
+    stage = Usd.Stage.CreateInMemory()
+    UsdPhysics.RigidBodyAPI.Apply(UsdGeom.Xform.Define(stage, "/Robot/base").GetPrim())
+    native_paths = ["/Robot"]  # PhysX wildcard selection exposes an articulation alias.
+    positions = {"/Robot/base": (1, 2, 3), "/Object": (4, 5, 6), "/Replacement": (7, 8, 9)}
+
+    def select(paths):
+        selected = list(native_paths) if paths == "/**" else list(paths)
+        values = wp.array(
+            [wp.transformf(wp.vec3f(*positions.get(path, (0, 0, 0))), wp.quat_identity()) for path in selected],
+            dtype=wp.transformf,
+            device="cpu",
+        )
+        return SimpleNamespace(
+            _backend=object(), prim_paths=selected, count=len(selected), get_transforms=lambda: values
+        )
+
+    native = SimpleNamespace(
+        create_rigid_body_view=Mock(side_effect=select),
+        get_object_type=lambda path: (
+            physx_manager.omni.physics.tensors.ObjectType.Articulation if path == "/Robot" else None
+        ),
+        create_articulation_view=lambda paths: SimpleNamespace(prim_paths=["/Robot"], link_paths=[["/Robot/base"]]),
+    )
+    backend = physx_manager.PhysxSceneDataBackend()
+    backend.backend = SimpleNamespace(simulation_view=native)
+    monkeypatch.setattr(physx_manager.PhysxManager, "pre_render", Mock())
+    provider = SceneDataProvider(backend)
+    backend.refresh_rigid_body_view(stage)
+    assert backend.transform_paths == ["/Robot/base"]
+    original = SceneDataFormat.Transform()
+    assert provider.get_transforms(original)
+    np.testing.assert_array_equal(original.transforms.numpy()[0, :3], [1, 2, 3])
+
+    UsdPhysics.RigidBodyAPI.Apply(UsdGeom.Xform.Define(stage, "/Object").GetPrim())
+    native_paths[:] = ["/Object", "/Robot"]
+    # The old bound selection cannot grow merely because physics loaded a body.
+    with pytest.raises(KeyError, match="/Object"):
+        provider.create_mapping(["/Robot/base", "/Object"])
+    backend.refresh_rigid_body_view(stage)
+    mapping = provider.create_mapping(["/Robot/base", "/Object"])
+    output = SceneDataFormat.Matrix44()
+    assert provider.get_transforms(output, mapping=mapping, count=2)
+    np.testing.assert_array_equal(output.matrices.numpy()[:, :3, 3], [[1, 2, 3], [4, 5, 6]])
+
+    # An unchanged path/count layout still needs a fresh converted publication.
+    positions["/Object"] = (10, 11, 12)
+    backend.refresh_rigid_body_view(stage)
+    assert provider.get_transforms(output, mapping=mapping, count=2)
+    np.testing.assert_array_equal(output.matrices.numpy()[:, :3, 3], [[1, 2, 3], [10, 11, 12]])
+
+    stage.RemovePrim("/Object")
+    UsdPhysics.RigidBodyAPI.Apply(UsdGeom.Xform.Define(stage, "/Replacement").GetPrim())
+    native_paths[:] = ["/Robot", "/Replacement"]
+    backend.refresh_rigid_body_view(stage)
+    assert backend.transform_paths == ["/Robot/base", "/Replacement"]
+    with pytest.raises(KeyError, match="/Object"):
+        provider.create_mapping(["/Object"])
+    replacement = SceneDataFormat.Transform()
+    assert provider.get_transforms(replacement)
+    np.testing.assert_array_equal(replacement.transforms.numpy()[:, :3], [[1, 2, 3], [7, 8, 9]])
+    assert replacement.transforms.ptr != original.transforms.ptr
+
+    # A failed rebind must not publish a half-selected layout or destroy the old buffer.
+    native.create_rigid_body_view.side_effect = RuntimeError("native selection failed")
+    with pytest.raises(RuntimeError, match="native selection failed"):
+        backend.refresh_rigid_body_view(stage)
+    assert backend.transform_paths == ["/Robot/base", "/Replacement"]
+    assert provider.get_transforms(replacement)
+    np.testing.assert_array_equal(replacement.transforms.numpy()[:, :3], [[1, 2, 3], [7, 8, 9]])
+
+    stage.RemovePrim("/Robot")
+    stage.RemovePrim("/Replacement")
+    backend.refresh_rigid_body_view(stage)  # Empty stages must not call the failing native selection.
+    assert backend.transform_count == 0
+    assert backend.transform_paths == []
+    assert not provider.get_transforms(SceneDataFormat.Transform())
