@@ -1,0 +1,1 @@
+* Added render-only dynamic liquid geometry and fixed cloth visual meshes for Newton Warp cameras without mutating the physics model. Cloth uses native color/UV texture shading with original-node mapping and isolated visual BVHs; soft-asset segmentation and transparent/refraction shading remain unsupported.

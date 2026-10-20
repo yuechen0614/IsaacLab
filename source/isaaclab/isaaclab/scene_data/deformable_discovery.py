@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 import warp as wp
 
-from pxr import Sdf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom
 
 from .. import sim as sim_utils
 from ..cloner import ClonePlan
@@ -129,7 +129,7 @@ def deformable_entry(root_prim: Usd.Prim) -> DeformableStageEntry | None:
         root_prim: Prim that carries a deformable-body API schema.
 
     Returns:
-        Geometry with vertices [m] baked into the parent frame and its world pose [m, xyzw],
+        Geometry with vertices [m] baked into the parent's rigid frame and its world pose [m, xyzw],
         or ``None`` when the prototype has no simulation mesh.
     """
     stage = root_prim.GetStage()
@@ -175,7 +175,13 @@ def deformable_entry(root_prim: Usd.Prim) -> DeformableStageEntry | None:
     vis_mesh_prim = _select_visual_mesh(vis_candidates, sim_mesh_prim, len(pts))
     xform_cache = UsdGeom.XformCache()
     parent_transform = xform_cache.GetLocalToWorldTransform(root_prim.GetParent())
-    world_to_parent = parent_transform.GetInverse()
+    # Native deformable placement contains translation and a unit quaternion,
+    # not scale or shear. Bake the remaining affine transform into the vertices
+    # so parent scale/reflection is not discarded or embedded in a quaternion.
+    rotation = Gf.Transform(parent_transform).GetRotation().GetQuat().GetNormalized()
+    parent_pose = Gf.Matrix4d(1.0).SetRotate(rotation)
+    parent_pose.SetTranslateOnly(parent_transform.ExtractTranslation())
+    world_to_parent = parent_pose.GetInverse()
     mesh_to_parent = np.asarray(xform_cache.GetLocalToWorldTransform(sim_mesh_prim) * world_to_parent)
     # USD affine transforms multiply row vectors.
     vertices = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
@@ -191,7 +197,6 @@ def deformable_entry(root_prim: Usd.Prim) -> DeformableStageEntry | None:
     if vis_mesh_prim.GetTypeName() == "Mesh":
         vis_indices = np.asarray(UsdGeom.Mesh(vis_mesh_prim).GetFaceVertexIndicesAttr().Get() or [], dtype=np.int32)
 
-    rotation = parent_transform.ExtractRotationQuat()
     return DeformableStageEntry(
         root_path=str(root_path),
         sim_mesh_path=str(sim_mesh_prim.GetPath()),

@@ -252,5 +252,12 @@ class PhysxCfg(PhysicsCfg):
     gpu_max_soft_body_contacts: int = 2**20
     """Size of soft body contacts stream buffer allocated in pinned host memory. Default is 2 ** 20."""
 
+    gpu_max_deformable_surface_contacts: int = 2**20
+    """Capacity of the GPU contact buffer for surface deformables. Default is 2 ** 20.
+
+    This is separate from the legacy soft-body and particle contact buffers. Increase
+    it for scenes with many self-colliding cloth triangles or multiple cloth instances.
+    """
+
     gpu_max_particle_contacts: int = 2**20
     """Size of particle contacts stream buffer allocated in pinned host memory. Default is 2 ** 20."""

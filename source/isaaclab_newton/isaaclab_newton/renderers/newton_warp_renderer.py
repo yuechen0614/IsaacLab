@@ -14,6 +14,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import newton
+import numpy as np
 import warp as wp
 
 from isaaclab.renderers import BaseRenderer, RenderBufferKind, RenderBufferSpec
@@ -448,6 +449,357 @@ class RenderData:
         output[0, tid] = wp.transformf(positions[tid], orientation)
 
 
+class _DynamicTriangleGeometry:
+    """Own render-only triangle buffers without modifying the physics model.
+
+    Newton 1.6 exposes triangle buffers on RenderContext but not its sensor.
+    Keep that version-dependent access here, verify it before use, and restore
+    the original sensor on close. Dynamic triangles use native flat normals and
+    synthetic shape IDs; they do not acquire MDL materials or instance labels.
+    """
+
+    def __init__(self, sensor):
+        context = getattr(sensor, "_SensorTiledCamera__render_context", None)
+        required = (
+            "triangle_points",
+            "triangle_indices",
+            "particle_world",
+            "_sync_triangle_mesh",
+            "triangle_mesh_group_roots",
+            "_RenderContext__topology_particle_mask",
+        )
+        if context is None or any(not hasattr(context, name) for name in required):
+            raise RuntimeError("This Newton SensorTiledCamera lacks the supported dynamic triangle interface.")
+        self.sensor, self.context = sensor, context
+        self._original_sync = sensor.sync_transforms
+        self._original_mask = context._RenderContext__topology_particle_mask
+        self._native_indices = (
+            sensor.model.tri_indices.numpy().reshape(-1).copy()
+            if sensor.model.tri_indices is not None
+            else np.empty(0, np.int32)
+        )
+        self._native_worlds = (
+            sensor.model.particle_world.numpy().copy()
+            if sensor.model.particle_world is not None
+            else np.empty(0, np.int32)
+        )
+        self._native_count = len(self._native_worlds)
+        self._points = self._indices = self._worlds = None
+        self.revision = -1
+        self._paths = None
+        self._world_ids = None
+        sensor.sync_transforms = self.sync
+
+    def publish(self, geometry, revision, hidden_particle_ranges=()):
+        """Accept validated world-space triangles for one complete revision."""
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < self.revision:
+            raise ValueError("Dynamic geometry revision must be a nondecreasing integer.")
+        if revision == self.revision:
+            return
+        paths = tuple(sorted(geometry))
+        if self._paths is not None and paths != self._paths:
+            raise ValueError("Dynamic mesh paths changed; rebuild the renderer session.")
+        world_ids = {path: geometry[path]["world_id"] for path in paths}
+        if self._world_ids is not None and world_ids != self._world_ids:
+            raise ValueError("Dynamic mesh world assignment changed; rebuild the renderer session.")
+        points, indices, worlds = [], [self._native_indices], [self._native_worlds]
+        offset = self._native_count
+        for path in paths:
+            mesh = geometry[path]
+            vertices = np.asarray(mesh["points"], dtype=np.float32)
+            triangles = np.asarray(mesh["face_vertex_indices"])
+            counts = np.asarray(mesh["face_vertex_counts"])
+            world = mesh["world_id"]
+            if (
+                vertices.ndim != 2
+                or vertices.shape[1:] != (3,)
+                or not np.isfinite(vertices).all()
+                or triangles.ndim != 1
+                or triangles.dtype.kind not in "iu"
+                or triangles.size % 3
+                or counts.ndim != 1
+                or counts.dtype.kind not in "iu"
+                or np.any(counts != 3)
+                or len(counts) * 3 != len(triangles)
+                or (triangles.size and (triangles.min() < 0 or triangles.max() >= len(vertices)))
+                or not isinstance(world, int)
+                or isinstance(world, bool)
+                or not 0 <= world < self.sensor.model.world_count
+            ):
+                raise ValueError(f"Invalid dynamic triangle geometry: {path}")
+            normals = mesh.get("normals")
+            if normals is not None and (np.asarray(normals).shape != vertices.shape or not np.isfinite(normals).all()):
+                raise ValueError(f"Invalid dynamic mesh normals: {path}")
+            points.append(vertices)
+            indices.append(triangles.astype(np.int32) + offset)
+            worlds.append(np.full(len(vertices), world, dtype=np.int32))
+            offset += len(vertices)
+        mask = (
+            self._original_mask.numpy().copy()
+            if self._original_mask is not None
+            else np.zeros(self._native_count, dtype=bool)
+        )
+        for start, count in hidden_particle_ranges:
+            if (
+                not isinstance(start, int)
+                or not isinstance(count, int)
+                or start < 0
+                or count < 0
+                or start + count > len(mask)
+            ):
+                raise ValueError("Hidden particle range exceeds the original physics particles.")
+            mask[start : start + count] = True
+        device = self.sensor.model.device
+        new_points = wp.empty(offset, dtype=wp.vec3f, device=device)
+        if points and sum(map(len, points)):
+            surface_points = wp.array(np.concatenate(points), dtype=wp.vec3f, device=device)
+            wp.copy(new_points, surface_points, dest_offset=self._native_count)
+        self._points = new_points
+        self._indices = wp.array(np.concatenate(indices), dtype=wp.int32, device=device)
+        self._worlds = wp.array(np.concatenate(worlds), dtype=wp.int32, device=device)
+        self.context._RenderContext__topology_particle_mask = wp.array(mask, dtype=wp.bool, device=device)
+        self._paths, self._world_ids, self.revision = paths, world_ids, revision
+
+    def sync(self, state):
+        """Refresh only render buffers; source particle positions stay untouched."""
+        if self._points is None:
+            self._original_sync(state)
+            return
+        if self._native_count:
+            wp.copy(self._points, state.particle_q, count=self._native_count)
+        context = self.context
+        if self._indices.shape[0]:
+            context.triangle_points = self._points
+            context.triangle_indices = self._indices
+            context.particle_world = self._worlds
+            context._sync_triangle_mesh()
+        else:
+            # Empty extraction must remove the preceding surface, including BVH
+            # roots. Keep native particle rendering and its visibility mask.
+            context._RenderContext__triangle_points = None
+            context._RenderContext__triangle_indices = None
+            context.triangle_mesh = None
+            context.triangle_mesh_group_roots.fill_(-1)
+
+    def close(self):
+        if self.sensor is None:
+            return
+        sensor, context = self.sensor, self.context
+        sensor.sync_transforms = self._original_sync
+        context._RenderContext__topology_particle_mask = self._original_mask
+        context._RenderContext__triangle_points = sensor.model.particle_q if len(self._native_indices) else None
+        context._RenderContext__triangle_indices = (
+            sensor.model.tri_indices.flatten() if len(self._native_indices) else None
+        )
+        context.particle_world = sensor.model.particle_world
+        context.triangle_mesh = None
+        context.triangle_mesh_group_roots.fill_(-1)
+        self.sensor = self.context = self._original_sync = None
+        self._points = self._indices = self._worlds = self._original_mask = None
+
+
+class _ClothVisualGeometry:
+    """Own only visual shapes/BVHs; borrow immutable physics state for rendering.
+
+    Native particle triangles have no material or UV lookup. A cloth therefore
+    gets one ordinary render Mesh with an explicit corner-to-native-node map.
+    The original physics model, particle buffers, solver and SDK assets remain
+    untouched. Existing rigid shapes share their immutable source geometry.
+    """
+
+    def __init__(self, sensor, geometry, materials, native_ranges):
+        context = getattr(sensor, "_SensorTiledCamera__render_context", None)
+        if context is None or not hasattr(context, "init_from_model"):
+            raise RuntimeError("Newton sensor lacks the supported visual-mesh interface.")
+        self.sensor, self.context = sensor, context
+        self.original = sensor.model
+        self._original_mask = context._RenderContext__topology_particle_mask
+        self._paths = tuple(sorted(geometry))
+        if set(materials) != set(self._paths):
+            raise ValueError("Cloth visual materials do not cover the exact native geometry paths.")
+        self.revision = -1
+        self.meshes, self.node_indices, self._topology = {}, {}, {}
+        self._world_ids = {path: geometry[path]["world_id"] for path in self._paths}
+        source = self.original
+        # This object has no solver, control, joints or new physics state.
+        # Native particle arrays/BVH are read-only references for other visuals.
+        view = newton.Model(device=source.device)
+        for name in (
+            "world_count",
+            "up_axis",
+            "body_count",
+            "particle_count",
+            "particle_q",
+            "particle_radius",
+            "particle_world",
+            "bvh_particles",
+            "bvh_particles_group_roots",
+            "gaussians_data",
+            "tet_indices",
+        ):
+            setattr(view, name, getattr(source, name))
+        view.shape_count = source.shape_count + len(self._paths)
+        view.shape_source = list(source.shape_source)
+        view.shape_label = list(source.shape_label)
+        extra = {
+            name: []
+            for name in (
+                "shape_type",
+                "shape_source_ptr",
+                "shape_scale",
+                "shape_transform",
+                "shape_body",
+                "shape_color",
+                "shape_flags",
+                "shape_world",
+            )
+        }
+        particle_mask = (
+            self._original_mask.numpy().copy()
+            if self._original_mask is not None
+            else np.zeros(source.particle_count, dtype=bool)
+        )
+        replace_nodes = np.zeros(source.particle_count, dtype=bool)
+        for path in self._paths:
+            packet, material = geometry[path], materials[path]
+            points = np.asarray(packet["points"], dtype=np.float32)
+            ids = np.asarray(material["node_indices"])
+            world = packet["world_id"]
+            if (
+                points.ndim != 2
+                or points.shape[1:] != (3,)
+                or not np.isfinite(points).all()
+                or ids.ndim != 1
+                or ids.dtype.kind not in "iu"
+                or len(ids) == 0
+                or np.any(ids < 0)
+                or np.any(ids >= len(points))
+                or type(world) is not int
+                or not 0 <= world < source.world_count
+            ):
+                raise ValueError(f"Invalid cloth visual nodes/world: {path}")
+            mesh = material["mesh"].copy(vertices=points[ids], recompute_inertia=False)
+            mesh.finalize(device=source.device)
+            self.meshes[path], self.node_indices[path] = mesh, ids.copy()
+            self._topology[path] = (
+                points.shape,
+                np.array(packet["face_vertex_counts"], copy=True),
+                np.array(packet["face_vertex_indices"], copy=True),
+            )
+            view.shape_source.append(mesh)
+            view.shape_label.append(path)
+            values = dict(
+                shape_type=int(newton.GeoType.MESH),
+                shape_source_ptr=mesh.mesh.id,
+                shape_scale=(1.0, 1.0, 1.0),
+                shape_transform=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+                shape_body=-1,
+                shape_color=mesh.color if mesh.color is not None else (0.5, 0.5, 0.5),
+                shape_flags=int(newton.ShapeFlags.VISIBLE) if material.get("visible", True) else 0,
+                shape_world=world,
+            )
+            for name, value in values.items():
+                extra[name].append(value)
+            if path in native_ranges:
+                start, count, kind = native_ranges[path]
+                if kind != "surface" or count != len(points) or start < 0 or start + count > source.particle_count:
+                    raise ValueError(f"Native cloth render range changed: {path}")
+                replace_nodes[start : start + count] = True
+                particle_mask[start : start + count] = True
+        types = dict(
+            shape_type=wp.int32,
+            shape_source_ptr=wp.uint64,
+            shape_scale=wp.vec3f,
+            shape_transform=wp.transformf,
+            shape_body=wp.int32,
+            shape_color=wp.vec3f,
+            shape_flags=wp.int32,
+            shape_world=wp.int32,
+        )
+        for name, values in extra.items():
+            suffix = np.asarray(values)
+            original = getattr(source, name)
+            prefix = original.numpy() if original is not None else np.empty((0, *suffix.shape[1:]))
+            setattr(view, name, wp.array(np.concatenate((prefix, suffix)), dtype=types[name], device=source.device))
+        native_triangles = (
+            source.tri_indices.numpy().reshape(-1, 3)
+            if source.tri_indices is not None
+            else np.empty((0, 3), dtype=np.int32)
+        )
+        if len(native_triangles):
+            selected = replace_nodes[native_triangles]
+            if np.any(np.any(selected, axis=1) != np.all(selected, axis=1)):
+                raise ValueError("Native cloth triangles span different geometry owners.")
+            native_triangles = native_triangles[~np.all(selected, axis=1)]
+        view.tri_indices = wp.array(native_triangles, dtype=wp.int32, device=source.device)
+        self.model = view
+        # Context owns material/texture tables. If initialization fails, restore
+        # the old sensor immediately; no partially rebound renderer is exposed.
+        try:
+            context.init_from_model(view)
+            context._RenderContext__topology_particle_mask = wp.array(
+                particle_mask, dtype=wp.bool, device=source.device
+            )
+            sensor.model = view
+        except BaseException:
+            context.init_from_model(source)
+            context._RenderContext__topology_particle_mask = self._original_mask
+            raise
+        self._built = False
+
+    def publish(self, geometry, revision):
+        if type(revision) is not int or revision < self.revision or tuple(sorted(geometry)) != self._paths:
+            raise ValueError("Cloth render paths or revision changed; rebuild the capture session.")
+        if revision == self.revision:
+            return
+        checked = {}
+        for path in self._paths:
+            packet = geometry[path]
+            points = np.asarray(packet["points"], dtype=np.float32)
+            shape, counts, indices = self._topology[path]
+            if (
+                points.shape != shape
+                or not np.isfinite(points).all()
+                or packet["world_id"] != self._world_ids[path]
+                or not np.array_equal(counts, packet["face_vertex_counts"])
+                or not np.array_equal(indices, packet["face_vertex_indices"])
+            ):
+                raise ValueError(f"Fixed cloth render geometry changed: {path}")
+            checked[path] = points[self.node_indices[path]]
+        # Validate the entire frame before any fallible native write.
+        for path, vertices in checked.items():
+            self.meshes[path].mesh.points.assign(vertices)
+            self.meshes[path].mesh.refit()
+        self._bounds = np.asarray(
+            [[vertices.min(axis=0), vertices.max(axis=0)] for vertices in checked.values()], dtype=np.float32
+        )
+        self.revision = revision
+
+    def sync(self, state):
+        """Refit owned mesh bounds and rigid poses, never physics geometry."""
+        model = self.model
+        # Physics may replace its particle BVH between frames. Keep only a
+        # current read-only reference; the visual adapter never refits it.
+        model.bvh_particles = self.original.bvh_particles
+        model.bvh_particles_group_roots = self.original.bvh_particles_group_roots
+        if not self._built:
+            model.bvh_build_shapes(state, shape_flags=newton.ShapeFlags.VISIBLE)
+            self._built = True
+        else:
+            model.bvh_shape_bounds[self.original.shape_count :].assign(self._bounds)
+            model.bvh_refit_shapes(state)
+
+    def close(self):
+        if self.sensor is None:
+            return
+        self.context.init_from_model(self.original)
+        self.context._RenderContext__topology_particle_mask = self._original_mask
+        self.sensor.model = self.original
+        self.sensor = self.context = self.model = self.original = self._original_mask = None
+        self.meshes.clear()
+        self.node_indices.clear()
+
+
 class NewtonWarpRenderer(BaseRenderer):
     """Newton Warp backend for tiled camera rendering."""
 
@@ -461,6 +813,8 @@ class NewtonWarpRenderer(BaseRenderer):
         self._stage: Any = None
         # Shared, scene-static segmentation lookup builder, created lazily in ``create_render_data``.
         self._seg_mapper: NewtonSegmentationMapper | None = None
+        self._dynamic_geometry = None
+        self._cloth_geometry = None
 
         sim = SimulationContext.instance()
         self.newton_cfg = NewtonBackendCfg(physics_cfg=sim.cfg.physics, device=sim.device)
@@ -624,6 +978,37 @@ class NewtonWarpRenderer(BaseRenderer):
             device=intrinsics.device,
         )
 
+    def set_deformable_geometry(self, geometry: dict, materials: dict, revision: int) -> None:
+        """Publish fixed cloth nodes with ordinary mesh color/UV shading.
+
+        ``materials`` contains render-only Mesh templates and exact corner-to-
+        native-node indices. No new camera or physics owner is constructed.
+        """
+        if self.newton_sensor is None:
+            raise RuntimeError("Initialize the renderer before publishing cloth geometry.")
+        if self._cloth_geometry is None:
+            if self._dynamic_geometry is not None:
+                raise RuntimeError("Declare cloth visual geometry before dynamic liquid surfaces.")
+            self._cloth_geometry = _ClothVisualGeometry(
+                self.newton_sensor, geometry, materials, self.backend.deformable_ranges
+            )
+        self._cloth_geometry.publish(geometry, revision)
+
+    def set_dynamic_geometry(self, geometry: dict, revision: int, hidden_particle_ranges=()) -> None:
+        """Publish world-space render-only liquid meshes without rebuilding physics.
+
+        Mesh entries contain ``points`` [m, N, 3], flat triangle indices,
+        triangle face counts, optional vertex normals, and integer ``world_id``.
+        Connectivity may change between revisions; paths and worlds are fixed.
+        Native triangle shading supplies flat normals and an unlabelled shape
+        ID. Per-object segmentation and MDL shading are not supported here.
+        """
+        if self.newton_sensor is None:
+            raise RuntimeError("Initialize the renderer before publishing dynamic geometry.")
+        if self._dynamic_geometry is None:
+            self._dynamic_geometry = _DynamicTriangleGeometry(self.newton_sensor)
+        self._dynamic_geometry.publish(geometry, revision, hidden_particle_ranges)
+
     def render(self, render_data: RenderData):
         """Render and write to output buffers. See :meth:`~isaaclab.renderers.base_renderer.BaseRenderer.render`."""
 
@@ -633,13 +1018,20 @@ class NewtonWarpRenderer(BaseRenderer):
             backend.state_0.body_q = poses.transforms
         if backend.geometry_offsets:
             provider.get_geometry_points(output=backend.state_0.particle_q, offsets=backend.geometry_offsets)
+        if self._cloth_geometry is not None:
+            self._cloth_geometry.sync(backend.state_0)
         render_data.graph = NewtonQueries.run_query(
             self.backend,
             provider.backend.transforms_timestamp + provider.backend.geometry_timestamp,
             partial(self._launch_render, render_data),
             render_data.graph,
             # Native triangle-mesh updates read back indices and may allocate after pointer swaps.
-            use_cuda_graph=self.cfg.use_cuda_graph and backend.model.tri_count == 0,
+            use_cuda_graph=(
+                self.cfg.use_cuda_graph
+                and backend.model.tri_count == 0
+                and self._dynamic_geometry is None
+                and self._cloth_geometry is None
+            ),
         )
 
         # Post-render PPISP: HDR scene-linear → LDR RGBA. Source/destination
@@ -724,4 +1116,10 @@ class NewtonWarpRenderer(BaseRenderer):
 
     def close(self) -> None:
         """Release borrowed native handles and SDP bindings after camera cleanup."""
+        if self._dynamic_geometry is not None:
+            self._dynamic_geometry.close()
+            self._dynamic_geometry = None
+        if self._cloth_geometry is not None:
+            self._cloth_geometry.close()
+            self._cloth_geometry = None
         self.newton_sensor = self.backend = self._scene_data_provider = self._transform_mapping = None
