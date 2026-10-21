@@ -174,15 +174,18 @@ class VisualShapeColorWriter:
     def rebind(self, model: Model) -> None:
         """Rebind the shape-color buffer after Newton replaces its model."""
         self._view.model = model
-        self._shape_colors = self._view.get_attribute("shape_color", model)[:, 0]
+        # A rebuild may replace shape_color on the same model object. Drop
+        # cached aliases/staging bindings before the next read of its storage.
+        self._view._get_attribute_array.cache_clear()
 
     def __call__(self, colors: torch.Tensor, env_ids: torch.Tensor) -> None:
-        """Write colors shaped ``[len(env_ids), body_count, 3]`` with one launch."""
+        """Write colors shaped ``[len(env_ids), body_count, 3]`` to selected worlds."""
         if len(self._shape_ids) and env_ids.numel():
             stream = (
                 wp.stream_from_torch(torch.cuda.current_stream(self.device)) if self.device.type == "cuda" else None
             )
             with wp.ScopedStream(stream, sync_enter=False):
+                shape_colors = self._view.get_attribute("shape_color", self.model)
                 wp.launch(
                     _write_shape_colors,
                     dim=(env_ids.numel(), len(self._shape_ids)),
@@ -191,7 +194,12 @@ class VisualShapeColorWriter:
                         wp.from_torch(env_ids, dtype=wp.int32),
                         self._shape_ids,
                         self._body_rows,
-                        self._shape_colors,
+                        shape_colors[:, 0],
                     ],
                     device=self.model.device,
+                )
+                world_mask = torch.zeros(self._view.world_count, dtype=torch.bool, device=self.device)
+                world_mask[env_ids.long()] = True
+                self._view.set_attribute(
+                    "shape_color", self.model, shape_colors, mask=wp.from_torch(world_mask, dtype=wp.bool)
                 )

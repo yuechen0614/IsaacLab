@@ -58,10 +58,6 @@ class randomize_rigid_body_material(ManagerTermBase):
         self._static_friction_range = cfg.params["static_friction_range"]
         self._restitution_range = cfg.params["restitution_range"]
 
-        model = self._newton_manager.get_model()
-        self._friction_binding = asset._root_view.get_attribute("shape_material_mu", model)[:, 0]  # type: ignore
-        self._restitution_binding = asset._root_view.get_attribute("shape_material_restitution", model)[:, 0]  # type: ignore
-
         if isinstance(asset, assets.Articulation) and asset_cfg.body_ids != slice(None):
             # The view's shape axis follows the model's shape order, which is not grouped by body,
             # so select each backend body's own shape indices.
@@ -70,7 +66,7 @@ class randomize_rigid_body_material(ManagerTermBase):
             shape_indices_list = [shape_id for body_id in backend_body_ids for shape_id in body_shapes[body_id]]
             self._shape_indices = torch.tensor(shape_indices_list, dtype=torch.long)
         else:
-            self._shape_indices = torch.arange(self._friction_binding.shape[1], dtype=torch.long)
+            self._shape_indices = torch.arange(asset._root_view.shape_count, dtype=torch.long)
 
     def __call__(
         self,
@@ -96,47 +92,61 @@ class randomize_rigid_body_material(ManagerTermBase):
             asset_cfg: Asset and body selection resolved at construction.
             make_consistent: Unused; Newton has a single friction coefficient.
         """
-        device = env.device
-        if env_ids is None:
-            env_ids = slice(None)
-        env_rows = env_ids if isinstance(env_ids, slice) else env_ids[:, None]
+        device = torch.device(env.device)
+        stream = wp.stream_from_torch(torch.cuda.current_stream(device)) if device.type == "cuda" else None
+        with wp.ScopedStream(stream, sync_enter=False):
+            if env_ids is None:
+                env_ids = slice(None)
+            env_rows = env_ids if isinstance(env_ids, slice) else env_ids[:, None]
 
-        num_shapes = len(self._shape_indices)
-        shape_idx = self._shape_indices.to(device)
+            num_shapes = len(self._shape_indices)
+            shape_idx = self._shape_indices.to(device)
 
-        friction_range = torch.tensor(self._static_friction_range, device=device)
-        restitution_range_t = torch.tensor(self._restitution_range, device=device)
-        friction_view = wp.to_torch(self._friction_binding)
-        restitution_view = wp.to_torch(self._restitution_binding)
+            friction_range = torch.tensor(self._static_friction_range, device=device)
+            restitution_range_t = torch.tensor(self._restitution_range, device=device)
+            model = self._newton_manager.get_model()
+            view = self.asset._root_view
+            # Shape attributes may be gathered buffers for heterogeneous worlds.
+            # Refresh before editing and explicitly scatter only selected worlds.
+            friction_binding = view.get_attribute("shape_material_mu", model)
+            restitution_binding = view.get_attribute("shape_material_restitution", model)
+            friction_view = wp.to_torch(friction_binding)[:, 0]
+            restitution_view = wp.to_torch(restitution_binding)[:, 0]
+            world_mask = torch.zeros(view.world_count, dtype=torch.bool, device=device)
 
-        num_envs = len(range(env.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
-        if isinstance(self._newton_manager._solver, SolverKamino):
-            # Kamino shares each material group across all environments.
-            if self._kamino_group_inverse is None:
-                build_keys = torch.stack((friction_view[0, shape_idx], restitution_view[0, shape_idx]), dim=-1)
-                _, inverse = torch.unique(build_keys, dim=0, return_inverse=True)
-                self._kamino_group_inverse = inverse
-                self._kamino_num_groups = int(inverse.max().item()) + 1 if inverse.numel() else 0
-            inverse = self._kamino_group_inverse
-            friction_groups = math_utils.sample_uniform(
-                friction_range[0], friction_range[1], (self._kamino_num_groups,), device=device
-            )
-            restitution_groups = math_utils.sample_uniform(
-                restitution_range_t[0], restitution_range_t[1], (self._kamino_num_groups,), device=device
-            )
-            friction_view[:, shape_idx] = friction_groups[inverse]
-            restitution_view[:, shape_idx] = restitution_groups[inverse]
-        else:
-            friction_samples = math_utils.sample_uniform(
-                friction_range[0], friction_range[1], (num_envs, num_shapes), device=device
-            )
-            restitution_samples = math_utils.sample_uniform(
-                restitution_range_t[0], restitution_range_t[1], (num_envs, num_shapes), device=device
-            )
-            friction_view[env_rows, shape_idx] = friction_samples
-            restitution_view[env_rows, shape_idx] = restitution_samples
+            num_envs = len(range(env.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
+            if isinstance(self._newton_manager._solver, SolverKamino):
+                # Kamino shares each material group across all environments.
+                if self._kamino_group_inverse is None:
+                    build_keys = torch.stack((friction_view[0, shape_idx], restitution_view[0, shape_idx]), dim=-1)
+                    _, inverse = torch.unique(build_keys, dim=0, return_inverse=True)
+                    self._kamino_group_inverse = inverse
+                    self._kamino_num_groups = int(inverse.max().item()) + 1 if inverse.numel() else 0
+                inverse = self._kamino_group_inverse
+                friction_groups = math_utils.sample_uniform(
+                    friction_range[0], friction_range[1], (self._kamino_num_groups,), device=device
+                )
+                restitution_groups = math_utils.sample_uniform(
+                    restitution_range_t[0], restitution_range_t[1], (self._kamino_num_groups,), device=device
+                )
+                friction_view[:, shape_idx] = friction_groups[inverse]
+                restitution_view[:, shape_idx] = restitution_groups[inverse]
+                world_mask[:] = True
+            else:
+                friction_samples = math_utils.sample_uniform(
+                    friction_range[0], friction_range[1], (num_envs, num_shapes), device=device
+                )
+                restitution_samples = math_utils.sample_uniform(
+                    restitution_range_t[0], restitution_range_t[1], (num_envs, num_shapes), device=device
+                )
+                friction_view[env_rows, shape_idx] = friction_samples
+                restitution_view[env_rows, shape_idx] = restitution_samples
+                world_mask[env_ids] = True
 
-        self._newton_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+            mask = wp.from_torch(world_mask, dtype=wp.bool)
+            view.set_attribute("shape_material_mu", model, friction_binding, mask=mask)
+            view.set_attribute("shape_material_restitution", model, restitution_binding, mask=mask)
+            self._newton_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
 
 
 class randomize_rigid_body_collider_offsets(ManagerTermBase):
@@ -167,11 +177,11 @@ class randomize_rigid_body_collider_offsets(ManagerTermBase):
         self._newton_manager = env.sim.physics_manager
 
         model = self._newton_manager.get_model()
-        self._sim_bind_shape_margin = asset._root_view.get_attribute("shape_margin", model)[:, 0]  # type: ignore
-        self._sim_bind_shape_gap = asset._root_view.get_attribute("shape_gap", model)[:, 0]  # type: ignore
-
-        self.default_margin = wp.to_torch(self._sim_bind_shape_margin).clone()
-        self.default_gap = wp.to_torch(self._sim_bind_shape_gap).clone()
+        device = torch.device(env.device)
+        stream = wp.stream_from_torch(torch.cuda.current_stream(device)) if device.type == "cuda" else None
+        with wp.ScopedStream(stream, sync_enter=False):
+            self.default_margin = wp.to_torch(asset._root_view.get_attribute("shape_margin", model))[:, 0].clone()
+            self.default_gap = wp.to_torch(asset._root_view.get_attribute("shape_gap", model))[:, 0].clone()
 
     def __call__(
         self,
@@ -192,40 +202,52 @@ class randomize_rigid_body_collider_offsets(ManagerTermBase):
             contact_offset_distribution_params: Contact offset distribution parameters [m].
             distribution: Sampling distribution for the offsets.
         """
-        if env_ids is None:
-            env_ids = slice(None)
+        device = torch.device(env.device)
+        stream = wp.stream_from_torch(torch.cuda.current_stream(device)) if device.type == "cuda" else None
+        with wp.ScopedStream(stream, sync_enter=False):
+            if env_ids is None:
+                env_ids = slice(None)
 
-        margin_view = wp.to_torch(self._sim_bind_shape_margin)
+            model = self._newton_manager.get_model()
+            view = self.asset._root_view
+            margin_binding = view.get_attribute("shape_margin", model)
+            gap_binding = view.get_attribute("shape_gap", model)
+            margin_view = wp.to_torch(margin_binding)[:, 0]
+            world_mask = torch.zeros(view.world_count, dtype=torch.bool, device=device)
+            world_mask[env_ids] = True
+            mask = wp.from_torch(world_mask, dtype=wp.bool)
 
-        if rest_offset_distribution_params is not None:
-            margin = self.default_margin.clone()
-            margin = _randomize_prop_by_op(
-                margin,
-                rest_offset_distribution_params,
-                None,
-                slice(None),
-                operation="abs",
-                distribution=distribution,
-            )
-            self.default_margin[env_ids] = margin[env_ids]
-            margin_view[env_ids] = margin[env_ids]
-        if contact_offset_distribution_params is not None:
-            current_margin = self.default_margin
-            contact_offset = torch.zeros_like(self.default_gap)
-            contact_offset = _randomize_prop_by_op(
-                contact_offset,
-                contact_offset_distribution_params,
-                None,
-                slice(None),
-                operation="abs",
-                distribution=distribution,
-            )
-            gap = torch.clamp(contact_offset - current_margin, min=0.0)
-            self.default_gap[env_ids] = gap[env_ids]
-            gap_view = wp.to_torch(self._sim_bind_shape_gap)
-            gap_view[env_ids] = gap[env_ids]
-        if rest_offset_distribution_params is not None or contact_offset_distribution_params is not None:
-            self._newton_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+            if rest_offset_distribution_params is not None:
+                margin = self.default_margin.clone()
+                margin = _randomize_prop_by_op(
+                    margin,
+                    rest_offset_distribution_params,
+                    None,
+                    slice(None),
+                    operation="abs",
+                    distribution=distribution,
+                )
+                self.default_margin[env_ids] = margin[env_ids]
+                margin_view[env_ids] = margin[env_ids]
+                view.set_attribute("shape_margin", model, margin_binding, mask=mask)
+            if contact_offset_distribution_params is not None:
+                current_margin = self.default_margin
+                contact_offset = torch.zeros_like(self.default_gap)
+                contact_offset = _randomize_prop_by_op(
+                    contact_offset,
+                    contact_offset_distribution_params,
+                    None,
+                    slice(None),
+                    operation="abs",
+                    distribution=distribution,
+                )
+                gap = torch.clamp(contact_offset - current_margin, min=0.0)
+                self.default_gap[env_ids] = gap[env_ids]
+                gap_view = wp.to_torch(gap_binding)[:, 0]
+                gap_view[env_ids] = gap[env_ids]
+                view.set_attribute("shape_gap", model, gap_binding, mask=mask)
+            if rest_offset_distribution_params is not None or contact_offset_distribution_params is not None:
+                self._newton_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
 
 
 class randomize_physics_scene_gravity(_GravityRandomization):
